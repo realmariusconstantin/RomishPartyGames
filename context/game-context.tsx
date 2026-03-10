@@ -3,7 +3,6 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { useRouter } from 'next/navigation';
-import { toast } from 'sonner';
 import { 
   Party, 
   ClientToServerEvents, 
@@ -21,29 +20,37 @@ interface GameContextType {
   
   createParty: (name: string) => void;
   joinParty: (code: string, name: string) => void;
-  startGame: (imposterCount: number) => void;
+  proposeGame: () => void;
+  voteStart: () => void;
+  cancelStart: () => void;
   voteSkip: () => void;
   votePlayer: (targetId: string) => void;
   syncState: () => void;
   updateSettings: (settings: PartySettings) => void;
   disbandParty: () => void;
   leaveParty: () => void;
+  sendMessage: (text: string) => void;
+  voteContinue: () => void;
+  voteLobby: () => void;
+  kickPlayer: (targetId: string) => void;
+  clearError: () => void;
 }
 
 const GameContext = createContext<GameContextType | undefined>(undefined);
 
 export function GameProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
-  const [socket, setSocket] = useState<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
+  const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
   const [partyState, setPartyState] = useState<Party | null>(null);
   const [roleInfo, setRoleInfo] = useState<{ role: 'imposter' | 'crew'; hint: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
-  const [playerId, setPlayerId] = useState<string | null>(() => {
+  const [socketId, setSocketId] = useState<string | null>(null);
+  const [playerId] = useState<string | null>(() => {
     if (typeof window !== 'undefined') {
       let id = sessionStorage.getItem('imposter_player_id');
       if (!id) {
-        id = `p-${Math.random().toString(36).substring(2, 6)}`; // Shorter for easy logging
+        id = crypto.randomUUID();
         sessionStorage.setItem('imposter_player_id', id);
         console.log(`%c[Identity] GENERATED NEW PLAYER ID: ${id}`, "color: #6366f1; font-weight: bold; background: #eef2ff; padding: 2px 6px; border-radius: 4px;");
       } else {
@@ -70,6 +77,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     newSocket.on('connect', () => {
       console.log('[Socket] Connected:', newSocket.id, 'as Player:', playerId);
       setIsConnected(true);
+      setSocketId(newSocket.id || null);
       setError(null);
       
       // Auto-rejoin if we have saved info
@@ -88,6 +96,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     newSocket.on('disconnect', () => {
       console.log('[Socket] Disconnected');
       setIsConnected(false);
+      setSocketId(null);
     });
 
     newSocket.on('state_update', (state) => {
@@ -108,84 +117,114 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       sessionStorage.setItem('imposter_party_code', code);
     });
 
-    newSocket.on('party:settingsUpdated', (settings) => {
-      setPartyState(prev => prev ? { ...prev, settings } : null);
-      toast.info('Party settings updated');
-    });
+    // Remove settings toast, handled silently
 
     newSocket.on('party:disbanded', () => {
       setPartyState(null);
       setRoleInfo(null);
       sessionStorage.removeItem('imposter_party_code');
-      toast.info('Party session ended');
+      // If we are currently in a lobby, the redirect tells us why
       router.push('/');
     });
 
-    setSocket(newSocket);
+    socketRef.current = newSocket;
 
     return () => {
       newSocket.close();
     };
-  }, []);
+  }, [playerId, router]);
 
   const createParty = useCallback((name: string) => {
     sessionStorage.setItem('imposter_player_name', name);
-    socket?.emit('create_party', name);
-  }, [socket]);
+    socketRef.current?.emit('create_party', name);
+  }, []);
 
   const joinParty = useCallback((code: string, name: string) => {
     sessionStorage.setItem('imposter_player_name', name);
     sessionStorage.setItem('imposter_party_code', code);
-    socket?.emit('join_party', code, name);
-  }, [socket]);
+    socketRef.current?.emit('join_party', code, name);
+  }, []);
 
-  const startGame = useCallback((imposterCount: number) => {
-    socket?.emit('start_game', imposterCount);
-  }, [socket]);
+  const proposeGame = useCallback(() => {
+    socketRef.current?.emit('propose_game');
+  }, []);
+
+  const voteStart = useCallback(() => {
+    socketRef.current?.emit('vote_start');
+  }, []);
+
+  const cancelStart = useCallback(() => {
+    socketRef.current?.emit('cancel_start');
+  }, []);
 
   const voteSkip = useCallback(() => {
-    socket?.emit('vote_skip');
-  }, [socket]);
+    socketRef.current?.emit('vote_skip');
+  }, []);
 
   const votePlayer = useCallback((targetId: string) => {
-    socket?.emit('vote_player', targetId);
-  }, [socket]);
+    socketRef.current?.emit('vote_player', targetId);
+  }, []);
 
   const syncState = useCallback(() => {
-    socket?.emit('state:sync');
-  }, [socket]);
+    socketRef.current?.emit('state:sync');
+  }, []);
 
   const updateSettings = useCallback((settings: PartySettings) => {
-    socket?.emit('party:updateSettings', settings);
-  }, [socket]);
+    socketRef.current?.emit('party:updateSettings', settings);
+  }, []);
 
-  const disbandParty = useCallback((reason?: string) => {
-    socket?.emit('party:disband');
-  }, [socket]);
+  const disbandParty = useCallback(() => {
+    socketRef.current?.emit('party:disband');
+  }, []);
 
   const leaveParty = useCallback(() => {
-    socket?.emit('party:leave');
+    socketRef.current?.emit('party:leave');
     setPartyState(null);
     setRoleInfo(null);
     sessionStorage.removeItem('imposter_party_code');
     router.push('/');
-  }, [socket, router]);
+  }, [router]);
+
+  const sendMessage = useCallback((text: string) => {
+    socketRef.current?.emit('send_message', text);
+  }, []);
+
+  const voteContinue = useCallback(() => {
+    socketRef.current?.emit('vote_continue');
+  }, []);
+
+  const voteLobby = useCallback(() => {
+    socketRef.current?.emit('vote_lobby');
+  }, []);
+
+  const clearError = useCallback(() => setError(null), []);
 
   return (
     <GameContext.Provider value={{
       partyState,
       roleInfo,
       error,
-      socketId: socket?.id || null,      playerId,      isConnected,
+      socketId,
+      playerId,
+      isConnected,
       createParty,
       joinParty,
-      startGame,
+      proposeGame,
+      voteStart,
+      cancelStart,
       voteSkip,
       votePlayer,
       syncState,
       updateSettings,
       disbandParty,
-      leaveParty
+      leaveParty,
+      sendMessage,
+      voteContinue,
+      voteLobby,
+      kickPlayer: (targetId: string) => {
+        socketRef.current?.emit('kick_player', targetId);
+      },
+      clearError,
     }}>
       {children}
     </GameContext.Provider>

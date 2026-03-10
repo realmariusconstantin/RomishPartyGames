@@ -1,20 +1,27 @@
-import { Party, GamePhase } from './types';
+import { Party, GamePhase, ChatMessage } from './types';
 
 const DISCONNECT_GRACE = 30000; // 30 seconds
 const PARTY_EMPTY_GRACE = 120000; // 2 minutes
 
+type InternalParty = Party & { emptyAt: number | null };
+
 export class GameEngine {
-  private parties: Map<string, Party & { emptyAt: number | null }> = new Map();
+  private parties: Map<string, InternalParty> = new Map();
   private socketToId: Map<string, string> = new Map();
   private idToParty: Map<string, string> = new Map();
+  private readonly TIMES: { PREGAME: number; ROUND: number; REVEAL: number; COUNTDOWN: number; RESULTS: number; VOTING_GRACE: number; VOTE_RESULTS: number };
+  private cleanupCounter = 0;
 
-  private get TIMES() {
+  constructor() {
     const isTest = process.env.TEST_MODE === 'true';
-    return {
+    this.TIMES = {
+      PREGAME: isTest ? 5 : 30,
       ROUND: isTest ? 10 : 120,
       REVEAL: isTest ? 2 : 5,
       COUNTDOWN: isTest ? 1 : 5,
-      RESULTS: isTest ? 2 : 10
+      RESULTS: isTest ? 2 : 10,
+      VOTING_GRACE: isTest ? 2 : 10,
+      VOTE_RESULTS: isTest ? 2 : 5
     };
   }
 
@@ -48,7 +55,9 @@ export class GameEngine {
         phase: GamePhase.LOBBY,
         imposterCount: 1,
         remainingTime: 0,
+        secretWord: null,
         hint: null,
+        category: null,
         lastEliminated: null,
         winner: null,
       },
@@ -60,7 +69,13 @@ export class GameEngine {
       settings: {
         maxPlayers: 10,
         impostersCount: 1,
-      }
+        language: 'english',
+      },
+      messages: [],
+      continueVotes: [],
+      lobbyVotes: [],
+      startVotes: [],
+      cancelVotes: [],
     };
     this.parties.set(code, party);
     this.socketToId.set(socketId, playerId);
@@ -68,7 +83,7 @@ export class GameEngine {
     return code;
   }
 
-  joinParty(code: string, playerId: string, socketId: string, playerName: string): Party | null {
+  joinParty(code: string, playerId: string, socketId: string, playerName: string): { party: Party, isNew: boolean } | null {
     const party = this.parties.get(code);
     if (!party) return null;
 
@@ -82,7 +97,7 @@ export class GameEngine {
       this.socketToId.set(socketId, playerId);
       this.idToParty.set(playerId, code);
       this.updateVoteThreshold(party);
-      return party;
+      return { party, isNew: false };
     }
 
     // Joining blocked once countdown starts
@@ -97,13 +112,14 @@ export class GameEngine {
       role: null,
       connected: true,
       disconnectedAt: null,
+      isDead: false, // Ensure initialized
     });
     
     party.emptyAt = null;
     this.socketToId.set(socketId, playerId);
     this.idToParty.set(playerId, code);
     this.updateVoteThreshold(party);
-    return party;
+    return { party, isNew: true };
   }
 
   getParty(code: string): Party | undefined {
@@ -139,8 +155,8 @@ export class GameEngine {
     
     if (settings.maxPlayers < currentCount) return null;
 
-    party.settings = settings;
-    party.game.imposterCount = settings.impostersCount; // Sync game state
+    party.settings = { ...party.settings, ...settings };
+    party.game.imposterCount = party.settings.impostersCount; // Sync game state
     return party;
   }
 
@@ -185,6 +201,12 @@ export class GameEngine {
       this.socketToId.delete(socketId);
       this.idToParty.delete(playerId);
 
+      // Clean up the leaving player's votes
+      delete party.votes.votes[playerId];
+      party.votes.votedSkip = party.votes.votedSkip.filter(id => id !== playerId);
+      party.continueVotes = party.continueVotes.filter(id => id !== playerId);
+      party.lobbyVotes = party.lobbyVotes.filter(id => id !== playerId);
+
       // If leader leaves, reassign leader
       if (player.isLeader && party.players.length > 0) {
         // Assign to oldest remaining player (first in list)
@@ -217,6 +239,15 @@ export class GameEngine {
       player.socketId = null;
       player.disconnectedAt = Date.now();
       
+      // Remove in-round votes so remaining active players aren't blocked
+      // waiting for a disconnected player, or having their vote count inflated.
+      // continueVotes/lobbyVotes are intentionally kept — those persist across reconnects.
+      const playerId = this.socketToId.get(socketId);
+      if (playerId) {
+        delete party.votes.votes[playerId];
+        party.votes.votedSkip = party.votes.votedSkip.filter(id => id !== playerId);
+      }
+
       // If leader leaves, reassign if any connected players left
       if (player.isLeader) {
         const nextLeader = party.players.find((p) => p.connected);
@@ -236,17 +267,57 @@ export class GameEngine {
     return party;
   }
 
+  kickPlayer(socketId: string, targetId: string): { party: Party, targetSocketId: string | null } | null {
+    const leaderParty = this.getPartyBySocket(socketId);
+    if (!leaderParty) return null;
+    
+    const me = leaderParty.players.find(p => p.socketId === socketId);
+    if (!me?.isLeader) return null;
+
+    const targetIndex = leaderParty.players.findIndex(p => p.id === targetId);
+    if (targetIndex === -1) return null;
+
+    const target = leaderParty.players[targetIndex];
+    if (target.isLeader) return null; // Cannot kick leader
+
+    const targetSocketId = target.socketId;
+
+    // Remove the player
+    leaderParty.players.splice(targetIndex, 1);
+    
+    // Clean up if they had votes
+    delete leaderParty.votes.votes[targetId];
+    leaderParty.continueVotes = leaderParty.continueVotes.filter(id => id !== targetId);
+    leaderParty.lobbyVotes = leaderParty.lobbyVotes.filter(id => id !== targetId);
+
+    this.addSystemMessage(leaderParty.code, `${target.name} has been removed from the network`);
+    this.updateVoteThreshold(leaderParty);
+
+    return { party: leaderParty, targetSocketId };
+  }
+
   // General cleanup of stale players and empty parties
   cleanup(): void {
     const now = Date.now();
     for (const [code, party] of this.parties.entries()) {
       // 1. Remove players who have been disconnected for too long
       const originalCount = party.players.length;
+
+      const removedIds: string[] = [];
       party.players = party.players.filter(p => {
         if (p.connected) return true;
-        if (!p.disconnectedAt) return false;
-        return (now - p.disconnectedAt) < DISCONNECT_GRACE;
+        if (!p.disconnectedAt) { removedIds.push(p.id); return false; }
+        if ((now - p.disconnectedAt) >= DISCONNECT_GRACE) { removedIds.push(p.id); return false; }
+        return true;
       });
+
+      // Clean up votes for removed players
+      if (removedIds.length > 0) {
+        removedIds.forEach(pid => { delete party.votes.votes[pid]; });
+        party.votes.votedSkip = party.votes.votedSkip.filter(id => !removedIds.includes(id));
+        party.continueVotes = party.continueVotes.filter(id => !removedIds.includes(id));
+        party.lobbyVotes = party.lobbyVotes.filter(id => !removedIds.includes(id));
+      }
 
       // If we removed a player, we might need a new leader
       if (party.players.length < originalCount) {
@@ -263,9 +334,9 @@ export class GameEngine {
     }
   }
 
-  startGame(code: string, imposterCount: number, secretWord: string, hint: string): Party | null {
+  startGame(code: string, imposterCount: number, secretWord: string, hint: string, category = ''): Party | null {
     const party = this.parties.get(code);
-    if (!party || party.game.phase !== GamePhase.LOBBY) return null;
+    if (!party || (party.game.phase !== GamePhase.LOBBY && party.game.phase !== GamePhase.PREGAME)) return null;
     
     // Minimum 3 players for Imposter game
     if (party.players.length < 3) return null;
@@ -279,6 +350,7 @@ export class GameEngine {
 
     party.game.secretWord = secretWord;
     party.game.hint = hint;
+    party.game.category = category;
     party.game.phase = GamePhase.COUNTDOWN;
     party.game.remainingTime = this.TIMES.COUNTDOWN;
 
@@ -292,10 +364,15 @@ export class GameEngine {
     const imposterIndices = indices.slice(0, party.game.imposterCount);
     party.players.forEach((p, i) => {
       p.role = imposterIndices.includes(i) ? 'imposter' : 'crew';
+      p.isDead = false;
     });
 
     party.votes.votedSkip = [];
     party.votes.votes = {};
+    party.continueVotes = [];
+    party.lobbyVotes = [];
+    party.startVotes = [];
+    party.cancelVotes = [];
     party.game.lastEliminated = null;
     party.game.winner = null;
     this.updateVoteThreshold(party);
@@ -303,9 +380,122 @@ export class GameEngine {
     return party;
   }
 
+  // --- Pre-game confirmation vote ---
+
+  proposeGame(socketId: string): Party | null {
+    const party = this.getPartyBySocket(socketId);
+    if (!party || party.game.phase !== GamePhase.LOBBY) return null;
+
+    const me = party.players.find(p => p.socketId === socketId);
+    if (!me?.isLeader) return null;
+    if (party.players.length < 3) return null;
+
+    party.game.phase = GamePhase.PREGAME;
+    party.game.remainingTime = this.TIMES.PREGAME;
+    party.startVotes = [me.id]; // Leader auto-votes yes
+    party.cancelVotes = [];
+    return party;
+  }
+
+  voteStart(socketId: string): { party: Party; shouldStart: boolean } | null {
+    const party = this.getPartyBySocket(socketId);
+    if (!party || party.game.phase !== GamePhase.PREGAME) return null;
+
+    const playerId = this.socketToId.get(socketId);
+    if (!playerId) return null;
+    if (party.startVotes.includes(playerId) || party.cancelVotes.includes(playerId)) {
+      return { party, shouldStart: false };
+    }
+
+    party.startVotes.push(playerId);
+    const connected = party.players.filter(p => p.connected).length;
+    const shouldStart = party.startVotes.length > connected / 2;
+    return { party, shouldStart };
+  }
+
+  cancelStart(socketId: string): { party: Party; shouldCancel: boolean } | null {
+    const party = this.getPartyBySocket(socketId);
+    if (!party || party.game.phase !== GamePhase.PREGAME) return null;
+
+    const playerId = this.socketToId.get(socketId);
+    if (!playerId) return null;
+    if (party.startVotes.includes(playerId) || party.cancelVotes.includes(playerId)) {
+      return { party, shouldCancel: false };
+    }
+
+    party.cancelVotes.push(playerId);
+    const connected = party.players.filter(p => p.connected).length;
+    const shouldCancel = party.cancelVotes.length >= connected / 2; // majority cancel or tie = cancel
+    return { party, shouldCancel };
+  }
+
+  private revertToLobby(party: Party): void {
+    party.game.phase = GamePhase.LOBBY;
+    party.game.remainingTime = 0;
+    party.startVotes = [];
+    party.cancelVotes = [];
+  }
+
+  // --- End pre-game ---
+
+  voteContinue(socketId: string): { party: Party; consensus: 'continue' | 'lobby' | null } | null {
+    const party = this.getPartyBySocket(socketId);
+    if (!party || party.game.phase !== GamePhase.RESULTS) return null;
+
+    const playerId = this.socketToId.get(socketId);
+    if (!playerId || party.continueVotes.includes(playerId) || party.lobbyVotes.includes(playerId)) return null;
+
+    party.continueVotes.push(playerId);
+    return this.checkConsensus(party);
+  }
+
+  voteLobby(socketId: string): { party: Party; consensus: 'continue' | 'lobby' | null } | null {
+    const party = this.getPartyBySocket(socketId);
+    if (!party || party.game.phase !== GamePhase.RESULTS) return null;
+
+    const playerId = this.socketToId.get(socketId);
+    if (!playerId || party.continueVotes.includes(playerId) || party.lobbyVotes.includes(playerId)) return null;
+
+    party.lobbyVotes.push(playerId);
+    return this.checkConsensus(party);
+  }
+
+  private checkConsensus(party: Party): { party: Party; consensus: 'continue' | 'lobby' | null } {
+    const connectedCount = party.players.filter(p => p.connected).length;
+    const totalVotes = party.continueVotes.length + party.lobbyVotes.length;
+
+    if (totalVotes < connectedCount) {
+      return { party, consensus: null };
+    }
+
+    const consensus: 'continue' | 'lobby' = party.continueVotes.length >= party.lobbyVotes.length
+      ? 'continue'
+      : 'lobby';
+
+    // Reset to lobby in both cases; server auto-starts a new game when consensus === 'continue'
+    party.game.phase = GamePhase.LOBBY;
+    party.game.remainingTime = 0;
+    party.game.winner = null;
+    party.game.secretWord = null;
+    party.game.hint = null;
+    party.game.category = null;
+    party.players.forEach(p => {
+      p.role = null;
+      p.isDead = false;
+    });
+    party.votes.votes = {};
+    party.votes.votedSkip = [];
+    party.continueVotes = [];
+    party.lobbyVotes = [];
+    party.startVotes = [];
+    party.cancelVotes = [];
+
+    return { party, consensus };
+  }
+
   votePlayer(socketId: string, targetId: string): Party | null {
     const party = this.getPartyBySocket(socketId);
-    if (!party || party.game.phase !== GamePhase.ROUND) return null;
+    if (!party || (party.game.phase !== GamePhase.ROUND && party.game.phase !== GamePhase.VOTING_GRACE)) return null;
 
     const playerId = this.socketToId.get(socketId);
     if (!playerId) return null;
@@ -314,12 +504,12 @@ export class GameEngine {
     const voter = party.players.find(p => p.id === playerId);
     const target = party.players.find(p => p.id === targetId);
 
-    if (!voter || !target || !voter.connected) return null;
+    if (!voter || !target || !voter.connected || voter.isDead) return null;
 
     party.votes.votes[playerId] = targetId;
 
     // Check if everyone voted
-    const activeVoters = party.players.filter(p => p.connected);
+    const activeVoters = party.players.filter(p => p.connected && !p.isDead);
     const votesCast = Object.keys(party.votes.votes).length;
 
     if (votesCast >= activeVoters.length) {
@@ -350,70 +540,112 @@ export class GameEngine {
     }
 
     if (electedId && !tie) {
-      const index = party.players.findIndex(p => p.id === electedId);
-      if (index !== -1) {
-        const eliminated = party.players[index];
-        party.game.lastEliminated = eliminated.id;
-        // Mark as role-revealed but don't delete from array if we want 
-        // to keep their socket connection for the Results screen.
-        // Actually, we use party.players.filter(p => p.role === 'imposter') in results.
-        // If we remove them from party.players, their server-side state is gone.
-        // Let's set a flag instead or just handle the count.
-        
-        // Fix: Leave the player in the array but remove their role/mark as spectator
-        // so they can see the results phase with the rest of the players.
-        eliminated.connected = false; // "Soft" remove to stop them from voting
+      const eliminated = party.players.find(p => p.id === electedId);
+      if (eliminated) {
+        eliminated.isDead = true;
         party.game.lastEliminated = eliminated.id;
       }
     } else {
       party.game.lastEliminated = 'TIE';
     }
 
-    // Check Win Conditions
-    const alivePlayers = party.players.filter(p => !party.game.lastEliminated || p.id !== party.game.lastEliminated);
-    const crewCount = party.players.filter(p => p.role === 'crew' && p.id !== party.game.lastEliminated).length;
-    const imposterCount = party.players.filter(p => p.role === 'imposter' && p.id !== party.game.lastEliminated).length;
+    party.game.phase = GamePhase.VOTE_RESULTS;
+    party.game.remainingTime = this.TIMES.VOTE_RESULTS;
+  }
+
+  voteSkip(socketId: string): { party: Party; thresholdMet: boolean } | null {
+    const party = this.getPartyBySocket(socketId);
+    if (!party || party.game.phase !== GamePhase.ROUND) return null;
+
+    const playerId = this.socketToId.get(socketId);
+    if (!playerId) return null;
+
+    const voter = party.players.find(p => p.id === playerId);
+    if (!voter || !voter.connected || voter.isDead) return null;
+
+    if (party.votes.votedSkip.includes(playerId)) return { party, thresholdMet: false };
+
+    party.votes.votedSkip.push(playerId);
+    const thresholdMet = party.votes.votedSkip.length >= party.votes.threshold;
+    if (thresholdMet) {
+      party.game.phase = GamePhase.VOTING_GRACE;
+      party.game.remainingTime = this.TIMES.VOTING_GRACE;
+    }
+    return { party, thresholdMet };
+  }
+
+  addMessage(socketId: string, text: string): { party: Party, message: ChatMessage } | null {
+    const party = this.getPartyBySocket(socketId);
+    if (!party) return null;
+
+    const playerId = this.socketToId.get(socketId);
+    const player = party.players.find(p => p.id === playerId);
+    if (!player) return null;
+
+    const message = {
+      id: Math.random().toString(36).substring(2, 9),
+      playerId: player.id,
+      playerName: player.name,
+      text,
+      timestamp: Date.now()
+    };
+
+    party.messages.push(message);
+    // Keep last 50 messages
+    if (party.messages.length > 50) party.messages.shift();
+
+    return { party, message };
+  }
+
+  addSystemMessage(code: string, text: string): ChatMessage | null {
+    const party = this.parties.get(code);
+    if (!party) return null;
+
+    const message = {
+      id: Math.random().toString(36).substring(2, 9),
+      playerId: 'system' as const,
+      playerName: 'Network',
+      text,
+      timestamp: Date.now()
+    };
+
+    party.messages.push(message);
+    if (party.messages.length > 50) party.messages.shift();
+    return message;
+  }
+
+  private updateVoteThreshold(party: Party) {
+    const activePlayers = party.players.filter((p) => p.connected && !p.isDead);
+    party.votes.threshold = Math.floor(activePlayers.length / 2) + 1;
+  }
+
+  private checkWinConditions(party: Party) {
+    const alivePlayers = party.players.filter(p => !p.isDead);
+    const crewCount = alivePlayers.filter(p => p.role === 'crew').length;
+    const imposterCount = alivePlayers.filter(p => p.role === 'imposter').length;
 
     if (imposterCount === 0) {
       party.game.winner = 'crew';
       party.game.phase = GamePhase.RESULTS;
-      party.game.remainingTime = this.TIMES.RESULTS;
+      party.game.remainingTime = 0; // Infinite time for results
     } else if (imposterCount >= crewCount) {
       party.game.winner = 'imposter';
       party.game.phase = GamePhase.RESULTS;
-      party.game.remainingTime = this.TIMES.RESULTS;
+      party.game.remainingTime = 0; // Infinite time for results
     } else {
-      // Continue to next round if not ended
-      // Actually remove the eliminated player from the main roster now so they don't count for next round
-      if (party.game.lastEliminated && party.game.lastEliminated !== 'TIE') {
-        const idx = party.players.findIndex(p => p.id === party.game.lastEliminated);
-        if (idx !== -1) {
-          const eliminated = party.players.splice(idx, 1)[0];
-          this.idToParty.delete(eliminated.id);
-        }
-      }
-      
+      // Continue next round
       party.votes.votes = {};
       party.votes.votedSkip = [];
       party.game.remainingTime = this.TIMES.ROUND;
+      party.game.phase = GamePhase.ROUND;
       this.updateVoteThreshold(party);
     }
   }
 
-  voteSkip(socketId: string): { party: Party; thresholdMet: boolean } | null {
-    return null;
-  }
-
-  private updateVoteThreshold(party: Party) {
-    const activePlayers = party.players.filter((p) => p.connected);
-    party.votes.threshold = Math.floor(activePlayers.length / 2) + 1;
-  }
-
   tick(): Party[] {
     const updatedParties: Party[] = [];
-    const now = Date.now();
 
-    for (const [code, party] of this.parties.entries()) {
+    for (const party of this.parties.values()) {
       let changed = false;
 
       if (party.game.remainingTime > 0) {
@@ -421,22 +653,25 @@ export class GameEngine {
         changed = true;
 
         if (party.game.remainingTime === 0) {
-          if (party.game.phase === GamePhase.COUNTDOWN) {
+          if (party.game.phase === GamePhase.PREGAME) {
+            // Timeout without majority — revert to lobby
+            this.revertToLobby(party);
+          } else if (party.game.phase === GamePhase.COUNTDOWN) {
             party.game.phase = GamePhase.REVEAL;
             party.game.remainingTime = this.TIMES.REVEAL;
           } else if (party.game.phase === GamePhase.REVEAL) {
             party.game.phase = GamePhase.ROUND;
             party.game.remainingTime = this.TIMES.ROUND;
           } else if (party.game.phase === GamePhase.ROUND) {
+            party.game.phase = GamePhase.VOTING_GRACE;
+            party.game.remainingTime = this.TIMES.VOTING_GRACE;
+          } else if (party.game.phase === GamePhase.VOTING_GRACE) {
             this.resolveVotes(party);
+          } else if (party.game.phase === GamePhase.VOTE_RESULTS) {
+            this.checkWinConditions(party);
           } else if (party.game.phase === GamePhase.RESULTS) {
-            party.game.phase = GamePhase.LOBBY;
+            // No auto-reset. Stay in results until consensus.
             party.game.remainingTime = 0;
-            party.game.winner = null;
-            // Clean up roles and votes for next game
-            party.players.forEach(p => p.role = null);
-            party.votes.votes = {};
-            party.votes.votedSkip = [];
           }
         }
       }
@@ -446,8 +681,11 @@ export class GameEngine {
       }
     }
     
-    // Periodically cleanup
-    this.cleanup();
+    // Run cleanup every 30 seconds (matches disconnect grace period)
+    this.cleanupCounter++;
+    if (this.cleanupCounter % 30 === 0) {
+      this.cleanup();
+    }
 
     return updatedParties;
   }

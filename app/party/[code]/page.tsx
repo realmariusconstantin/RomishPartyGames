@@ -3,624 +3,595 @@
 import { useGame } from '@/hooks/use-game';
 import { useEffect, useState, useRef } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
-import { GamePhase } from '@/lib/types';
+import { GamePhase, Party, ChatMessage } from '@/lib/types';
 import { toast } from 'sonner';
-import { 
-  Users, 
-  Copy, 
-  ChevronRight, 
-  ShieldAlert, 
-  Timer, 
-  CheckCircle2, 
-  Crown, 
-  Radio, 
-  AlertCircle,
-  Play,
-  Home as HomeIcon,
-  RefreshCw,
-  Settings2,
-  LogOut,
-  RotateCcw
+import {
+  Users, Copy, ChevronRight, ShieldAlert, CheckCircle2, Crown,
+  Radio, Home as HomeIcon, Settings2, LogOut, RotateCcw, Zap,
+  MessageSquare, X, Globe,
 } from 'lucide-react';
+
+// ─── Chat Panel ──────────────────────────────────────────────────────────────
+const ChatPanel = ({
+  partyState, playerId, chatInput, setChatInput, handleSendMessage, messagesEndRef, onClose,
+}: {
+  partyState: Party; playerId: string | null; chatInput: string;
+  setChatInput: (v: string) => void; handleSendMessage: (e: React.FormEvent) => void;
+  messagesEndRef: React.RefObject<HTMLDivElement | null>; onClose?: () => void;
+}) => (
+  <div className="flex flex-col h-full bg-slate-900 border-t border-slate-800">
+    {onClose && (
+      <div className="flex justify-between items-center px-4 py-3 border-b border-slate-800 shrink-0">
+        <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 flex items-center gap-2">
+          <Radio size={12} /> Comms
+        </p>
+        <button onClick={onClose} className="p-2 text-slate-500 hover:text-white rounded-lg transition-colors">
+          <X size={16} />
+        </button>
+      </div>
+    )}
+    <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      {partyState.messages.length === 0 && (
+        <div className="text-center text-slate-700 py-20 italic text-sm">No transmissions yet…</div>
+      )}
+      {partyState.messages.map((m: ChatMessage) => (
+        <div key={m.id} className={`flex flex-col ${m.playerId === playerId ? 'items-end' : 'items-start'}`}>
+          {m.playerId === 'system' ? (
+            <div className="w-full flex justify-center py-2">
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-800/50 px-3 py-1 rounded-full">{m.text}</span>
+            </div>
+          ) : (
+            <div className={`max-w-[80%] p-3 shadow-sm border border-white/5 ${m.playerId === playerId ? 'bg-indigo-600 text-white rounded-2xl rounded-tr-none' : 'bg-slate-800 text-slate-200 rounded-2xl rounded-tl-none'}`}>
+              <p className="text-[9px] font-black uppercase tracking-tighter opacity-50 mb-1">{m.playerName}</p>
+              <p className="text-sm font-bold leading-snug">{m.text}</p>
+            </div>
+          )}
+        </div>
+      ))}
+      <div ref={messagesEndRef} />
+    </div>
+    <form onSubmit={handleSendMessage} className="p-3 border-t border-slate-800 flex gap-2 shrink-0">
+      <input
+        type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)}
+        placeholder="Type a message…" autoComplete="off"
+        className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+      />
+      <button type="submit" className="p-3 bg-indigo-600 text-white rounded-xl active:bg-indigo-700 transition-colors min-w-[48px] flex items-center justify-center">
+        <ChevronRight size={20} />
+      </button>
+    </form>
+  </div>
+);
 
 export default function PartyPage() {
   const { code } = useParams();
   const searchParams = useSearchParams();
   const router = useRouter();
   const userName = searchParams.get('name');
-  
-  const { 
-    partyState, 
-    roleInfo, 
-    error, 
-    joinParty, 
-    startGame, 
-    voteSkip,
-    votePlayer,
-    updateSettings,
-    disbandParty,
-    leaveParty,
-    socketId,
-    playerId,
-    isConnected
+
+  const {
+    partyState, error, joinParty, proposeGame, voteStart, cancelStart,
+    voteSkip, votePlayer, voteContinue, voteLobby, kickPlayer,
+    updateSettings, leaveParty, sendMessage, playerId, isConnected, clearError,
   } = useGame();
 
-  const [activeTab, setActiveTab] = useState<'lobby' | 'manage'>('lobby');
-  const [isStarting, setIsStarting] = useState(false);
-  const [isVoting, setIsVoting] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
-  
-  // Local settings state
-  const [localSettings, setLocalSettings] = useState({ maxPlayers: 10, impostersCount: 1 });
-  
-  const currentPlayers = partyState?.players.length || 0;
-  const maxAllowedImposters = currentPlayers >= 10 ? 3 : (currentPlayers >= 7 ? 2 : 1);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+  const [chatInput, setChatInput] = useState('');
+
+  const currentPlayers = partyState?.players.length ?? 0;
+  const maxAllowedImposters = currentPlayers >= 10 ? 3 : currentPlayers >= 7 ? 2 : 1;
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const prevMsgCount = useRef(0);
 
   useEffect(() => {
-    if (code && userName && isConnected) {
-      joinParty(code as string, userName);
+    if (partyState?.messages && partyState.messages.length > prevMsgCount.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      prevMsgCount.current = partyState.messages.length;
     }
+  }, [partyState?.messages]);
+
+  const handleSendMessage = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!chatInput.trim()) return;
+    sendMessage(chatInput.trim());
+    setChatInput('');
+  };
+
+  useEffect(() => {
+    if (code && userName && isConnected) joinParty(code as string, userName);
   }, [code, userName, joinParty, isConnected]);
 
   useEffect(() => {
-    if (partyState?.settings) {
-      // Clamp imposters count based on current players if needed
-      setLocalSettings(prev => ({
-        ...partyState.settings,
-        impostersCount: Math.min(partyState.settings.impostersCount, maxAllowedImposters)
-      }));
+    if (partyState?.settings && partyState.settings.impostersCount > maxAllowedImposters) {
+      updateSettings({ ...partyState.settings, impostersCount: maxAllowedImposters });
     }
-  }, [partyState?.settings, maxAllowedImposters]);
+  }, [partyState?.settings, maxAllowedImposters, updateSettings]);
 
   useEffect(() => {
-    if (error) {
-      toast.error(error);
-      setIsStarting(false);
-      setIsVoting(false);
-      setIsSaving(false);
+    if (error) { toast.error(error); clearError(); }
+  }, [error, clearError]);
+
+  useEffect(() => {
+    if (isConnected && !partyState) {
+      const t = setTimeout(() => { if (!partyState) router.push('/'); }, 10000);
+      return () => clearTimeout(t);
     }
-  }, [error]);
+  }, [isConnected, partyState, router]);
 
   const me = partyState?.players.find(p => p.id === playerId);
-  const isLeader = me?.isLeader;
-
-  // Security: Redirect non-leaders from manage tab
-  useEffect(() => {
-    if (activeTab === 'manage' && !isLeader) {
-      setActiveTab('lobby');
-      toast.error('Not authorized');
-    }
-  }, [activeTab, isLeader]);
+  const isLeader = me?.isLeader ?? false;
 
   const copyCode = () => {
     navigator.clipboard.writeText(code as string);
-    toast.success('Party Code Copied!');
+    toast.success('Code copied!');
   };
 
-  const handleStart = async () => {
-    if (isStarting) return;
-    if (currentPlayers < 3) {
-      toast.error('Minimum 3 agents required for this mission');
-      return;
-    }
-    setIsStarting(true);
-    startGame(localSettings.impostersCount);
-  };
-
-  const handleUpdateSettings = () => {
-    setIsSaving(true);
-    updateSettings({
-      ...localSettings,
-      impostersCount: Math.min(localSettings.impostersCount, maxAllowedImposters)
-    });
-    setTimeout(() => setIsSaving(false), 500);
-  };
-
-  const handleLeaveAndEnd = () => {
-    disbandParty();
-  };
-
-  const handleVote = async () => {
-    if (isVoting) return;
-    setIsVoting(true);
-    voteSkip();
-    setTimeout(() => setIsVoting(false), 500);
-  };
-
-  const handleLeave = () => {
-    leaveParty();
+  const handleStart = () => {
+    if (currentPlayers < 3) { toast.error('Need at least 3 players to start'); return; }
+    proposeGame();
   };
 
   const onVotePlayer = (targetId: string) => {
-    if (partyState?.votes.votes[playerId || '']) return;
+    if (me?.isDead || partyState?.votes.votes[playerId ?? '']) return;
     votePlayer(targetId);
   };
 
+  // ── Loading screen ─────────────────────────────────────────────────────────
   if (!partyState || !isConnected) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-white">
+      <div className="flex flex-col items-center justify-center min-h-dvh bg-slate-950">
         <div className="relative">
-          <div className="animate-spin rounded-full h-20 w-20 border-8 border-slate-50 border-t-indigo-600"></div>
+          <div className="animate-spin rounded-full h-20 w-20 border-b-2 border-indigo-500" />
           <div className="absolute inset-0 flex items-center justify-center">
-            <Radio className="text-indigo-600 animate-pulse" size={24} />
+            <Radio className="text-indigo-500 animate-pulse" size={28} />
           </div>
         </div>
-        <p className="mt-8 text-slate-400 font-black uppercase tracking-[0.3em] text-xs">Establishing Link...</p>
+        <p className="mt-6 text-indigo-500/50 font-black uppercase tracking-[0.4em] text-[10px] animate-pulse">Connecting…</p>
       </div>
     );
   }
 
+  const phase = partyState.game.phase;
+  const hasVotedStart = partyState.startVotes.includes(playerId ?? '');
+  const hasVotedCancel = partyState.cancelVotes.includes(playerId ?? '');
+  const hasPregameVoted = hasVotedStart || hasVotedCancel;
+  const msgCount = partyState.messages.length;
+
   return (
-    <main className="max-w-6xl mx-auto min-h-screen p-4 md:p-8 flex flex-col font-sans bg-slate-50 selection:bg-indigo-100">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row justify-between items-center gap-4 mb-6 md:mb-10 bg-white p-5 md:px-8 rounded-[2.5rem] shadow-sm border border-slate-100">
-        <div className="flex items-center gap-6 w-full md:w-auto">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-black tracking-tight text-slate-900">PARTY <span data-testid="display-code" className="text-indigo-600 font-mono tracking-normal">{partyState.code}</span></h1>
-              <button 
-                onClick={copyCode}
-                title="Copy Code"
-                className="p-2 bg-slate-50 text-slate-400 hover:text-indigo-600 hover:bg-white rounded-xl transition-all active:scale-90"
-              >
-                <Copy size={16} />
-              </button>
-            </div>
-            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
-              <Users size={12} strokeWidth={3} />
-              {partyState.players.length} / {partyState.settings.maxPlayers} Agents
-            </p>
-          </div>
-          
-          <div className="h-10 w-px bg-slate-100 hidden md:block" />
-          
-          <div className="md:block">
-            <p className="text-sm font-black text-slate-900 leading-none mb-1.5">{me?.name || 'Joining...'}</p>
-            <span className={`text-[9px] font-black px-3 py-1 rounded-full uppercase tracking-[0.2em] flex items-center gap-1.5 ${isLeader ? 'bg-amber-100 text-amber-700' : 'bg-indigo-50 text-indigo-600'}`}>
-              {isLeader ? <Crown size={10} strokeWidth={3} /> : <Radio size={10} strokeWidth={3} />}
-              {isLeader ? 'Leader' : 'Agent'}
-            </span>
-          </div>
-        </div>
+    <main className="min-h-dvh flex flex-col bg-slate-950 text-slate-200">
 
-        <button 
-          onClick={handleLeave}
-          data-testid="btn-leave"
-          className="w-full md:w-auto px-6 py-3 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 text-slate-500 font-black rounded-2xl text-[10px] uppercase tracking-widest transition-all flex items-center justify-center gap-2"
-        >
-          <LogOut size={14} />
-          Leave Party
+      {/* ── Persistent Header ── */}
+      <header className="flex items-center justify-between px-4 py-3 bg-slate-900 border-b border-slate-800 shrink-0">
+        <button onClick={copyCode} className="flex items-center gap-2 group active:scale-95 transition-transform">
+          <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest">CODE</span>
+          <span data-testid="display-code" className="text-xl font-black text-indigo-400 font-mono tracking-widest">{partyState.code}</span>
+          <Copy size={14} className="text-slate-600 group-hover:text-indigo-400 transition-colors" />
         </button>
-      </div>
-
-      {/* Tabs (Lobby Phase Only) */}
-      {partyState.game.phase === GamePhase.LOBBY && isLeader && (
-        <div data-testid="leader-controls" className="flex gap-2 mb-8 bg-slate-200/50 p-1.5 rounded-[2rem] w-fit mx-auto md:mx-0">
-          <button 
-            onClick={() => setActiveTab('lobby')}
-            data-testid="tab-lobby"
-            className={`px-8 py-3 rounded-full text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === 'lobby' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
+        <div className="flex items-center gap-2">
+          <span className={`hidden sm:block text-[9px] font-black px-2 py-1 rounded-full uppercase tracking-widest ${isLeader ? 'bg-amber-900/30 text-amber-400' : 'bg-slate-800 text-slate-500'}`}>
+            {isLeader ? '★ Host' : me?.name ?? '…'}
+          </span>
+          <button
+            onClick={() => leaveParty()}
+            data-testid="btn-leave"
+            className="p-2 bg-slate-800 text-slate-500 rounded-xl active:bg-rose-900/40 active:text-rose-400 transition-colors min-w-[40px] min-h-[40px] flex items-center justify-center"
           >
-            Mission Lobby
-          </button>
-          <button 
-            onClick={() => setActiveTab('manage')}
-            data-testid="tab-manage"
-            className={`px-8 py-3 rounded-full text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2 ${activeTab === 'manage' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
-          >
-            <Settings2 size={12} />
-            Manage
+            <LogOut size={16} />
           </button>
         </div>
-      )}
+      </header>
 
-      <div className="flex-grow flex flex-col items-center">
-        {partyState.game.phase === GamePhase.LOBBY && (
-          <div className="w-full animate-in fade-in slide-in-from-bottom-4 duration-500">
-            {activeTab === 'lobby' ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full max-w-5xl">
-                <div className="bg-white p-6 md:p-10 rounded-[2.5rem] shadow-xl shadow-slate-200/50 border border-slate-100 flex flex-col h-full">
-                  <h2 className="text-[11px] font-black uppercase tracking-[0.3em] text-slate-400 mb-8 px-1 flex items-center gap-2">
-                    <Radio size={16} className="text-indigo-500 animate-pulse" />
-                    Agent Network ({partyState.players.length})
-                  </h2>
-                  <div className="flex-grow">
-                    <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3" data-testid="player-list">
-                      {partyState.players.map(p => (
-                        <li key={p.id} className="group flex items-center justify-between p-4 bg-slate-50 rounded-2xl border-2 border-transparent hover:border-indigo-100 transition-all">
-                          <div className="flex items-center gap-3">
-                            <div className="relative">
-                              <div className={`w-2.5 h-2.5 rounded-full ${p.connected ? 'bg-emerald-500' : 'bg-slate-300'}`}></div>
-                              {p.connected && <div className="absolute inset-0 bg-emerald-500 rounded-full animate-ping opacity-20"></div>}
-                            </div>
-                            <span className="font-bold text-slate-700 text-base tracking-tight truncate max-w-[120px]" data-testid={`player-${p.id}`}>
-                              {p.name}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            {p.id === socketId && <span className="bg-indigo-100 text-indigo-600 text-[8px] font-black px-2 py-0.5 rounded-full uppercase">YOU</span>}
-                            {p.isLeader ? (
-                              <div className="p-1.5 bg-amber-50 text-amber-500 rounded-lg shadow-sm border border-amber-100">
-                                <Crown size={12} strokeWidth={3} />
-                              </div>
-                            ) : (
-                              <div className="w-6 h-6 rounded-lg bg-slate-100 border border-slate-200" />
-                            )}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
+      {/* ── Phase Content ── */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+
+        {/* LOBBY ─────────────────────────────────────────────────────────── */}
+        {phase === GamePhase.LOBBY && (
+          <div className="flex-1 flex flex-col p-4 gap-4 overflow-y-auto">
+            {/* Player count */}
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-600 flex items-center gap-1.5">
+                <Users size={12} strokeWidth={3} />
+                {currentPlayers} / {partyState.settings.maxPlayers} agents
+              </p>
+              {currentPlayers < 3 && (
+                <p className="text-[10px] text-amber-500/70 font-black uppercase tracking-widest">Need {3 - currentPlayers} more</p>
+              )}
+            </div>
+
+            {/* Player grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {partyState.players.map((p) => (
+                <div key={p.id} className="relative flex items-center gap-3 p-3 bg-slate-900 rounded-2xl border border-slate-800">
+                  <div className={`w-10 h-10 rounded-xl shrink-0 flex items-center justify-center font-black text-base ${p.id === playerId ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}>
+                    {p.name[0].toUpperCase()}
                   </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-black text-white truncate">{p.name}</p>
+                    {p.isLeader && <p className="text-[9px] text-amber-400 font-black uppercase tracking-widest">Host</p>}
+                  </div>
+                  {isLeader && !p.isLeader && (
+                    <button onClick={() => kickPlayer(p.id)} className="absolute top-1 right-1 p-1 text-slate-700 hover:text-rose-400 transition-colors rounded-lg" title="Kick">
+                      <X size={12} />
+                    </button>
+                  )}
+                  {!p.connected && <div className="absolute top-1 right-1 w-2 h-2 bg-rose-500 rounded-full" title="Disconnected" />}
                 </div>
+              ))}
+              {[...Array(Math.max(0, 3 - currentPlayers))].map((_, i) => (
+                <div key={i} className="flex items-center gap-3 p-3 bg-slate-900/30 rounded-2xl border border-dashed border-slate-800">
+                  <div className="w-10 h-10 rounded-xl border border-dashed border-slate-800 flex items-center justify-center">
+                    <Users size={16} className="text-slate-800" />
+                  </div>
+                  <p className="text-[10px] font-black text-slate-700 uppercase tracking-widest">Waiting…</p>
+                </div>
+              ))}
+            </div>
 
-                <div className="flex flex-col gap-6">
-                  {isLeader ? (
-                    <div className="bg-indigo-900 p-8 md:p-10 rounded-[2.5rem] text-white shadow-2xl shadow-indigo-200 flex flex-col justify-center items-center text-center space-y-8 min-h-[320px]">
-                      <div className="p-5 bg-white/10 rounded-[2rem] backdrop-blur-md">
-                        <Play size={48} fill="currentColor" />
+            {/* Settings – leader only, lobby only */}
+            {isLeader && (
+              <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden">
+                <button
+                  onClick={() => setShowSettings(!showSettings)}
+                  className="w-full flex items-center justify-between p-4 text-left active:bg-slate-800/70 transition-colors"
+                >
+                  <span className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                    <Settings2 size={14} /> Settings
+                  </span>
+                  <ChevronRight size={16} className={`text-slate-600 transition-transform duration-200 ${showSettings ? 'rotate-90' : ''}`} />
+                </button>
+                {showSettings && (
+                  <div className="px-4 pb-5 space-y-5 border-t border-slate-800">
+                    {/* Max players */}
+                    <div className="pt-4 space-y-2">
+                      <div className="flex justify-between items-center">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Max Players</label>
+                        <span className="text-sm font-black text-indigo-400">{partyState.settings.maxPlayers}</span>
                       </div>
-                      <div className="space-y-2">
-                        <h3 className="text-2xl font-black italic tracking-tighter">MISSION READY</h3>
-                        <p className="text-indigo-200 text-xs font-bold leading-relaxed max-w-xs mx-auto">
-                          {partyState.players.length < 3 
-                            ? "Awaiting more agents. Minimum 3 required for deployment." 
-                            : "Launch the operation. Roles will be assigned instantly to all connected agents."}
-                        </p>
+                      <input
+                        type="range" min="3" max="10" value={partyState.settings.maxPlayers}
+                        onChange={(e) => updateSettings({ ...partyState.settings, maxPlayers: parseInt(e.target.value) })}
+                        className="w-full h-1.5 bg-slate-800 rounded-full appearance-none cursor-pointer accent-indigo-500"
+                      />
+                    </div>
+                    {/* Imposters */}
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Imposters</label>
+                      <div className="flex gap-2">
+                        {[1, 2, 3].map(n => (
+                          <button
+                            key={n} disabled={n > maxAllowedImposters}
+                            onClick={() => updateSettings({ ...partyState.settings, impostersCount: n })}
+                            className={`flex-1 py-3 rounded-xl font-black text-base transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${partyState.settings.impostersCount === n ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400 active:bg-slate-700'}`}
+                          >{n}</button>
+                        ))}
                       </div>
-                      <button 
-                        onClick={handleStart}
-                        data-testid="btn-start"
-                        disabled={partyState.players.length < 3 || isStarting}
-                        className="group w-full py-6 bg-white text-indigo-900 font-black rounded-[2rem] text-xl shadow-xl active:scale-95 transition-all disabled:opacity-30 disabled:pointer-events-none flex items-center justify-center gap-3 tracking-tighter"
-                      >
-                        {isStarting ? (
-                          <div className="w-6 h-6 border-4 border-indigo-900/30 border-t-indigo-900 rounded-full animate-spin" />
-                        ) : (
-                          <>
-                            START MISSION
-                            <ChevronRight size={24} strokeWidth={3} />
-                          </>
-                        )}
-                      </button>
-                      {partyState.players.length < 2 && (
-                        <p className="text-[10px] font-black text-indigo-300 uppercase tracking-widest italic flex items-center gap-2">
-                          <AlertCircle size={14} />
-                          Need 2+ Agents
-                        </p>
+                      {maxAllowedImposters < 3 && (
+                        <p className="text-[9px] text-slate-600 italic">Need {maxAllowedImposters === 1 ? '7' : '10'}+ players for more imposters</p>
                       )}
                     </div>
-                  ) : (
-                    <div className="bg-white p-12 md:p-16 rounded-[2.5rem] border-4 border-dashed border-slate-100 flex flex-col items-center justify-center text-center space-y-8 flex-grow">
-                      <div className="flex justify-center gap-3">
-                        <div className="w-4 h-4 bg-indigo-600 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                        <div className="w-4 h-4 bg-indigo-600 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                        <div className="w-4 h-4 bg-indigo-600 rounded-full animate-bounce"></div>
-                      </div>
-                      <div className="space-y-2">
-                        <p className="text-slate-800 font-black text-xl italic tracking-tight uppercase">AWAITING LEADER</p>
-                        <p className="text-slate-400 font-bold uppercase tracking-[0.2em] text-[10px]">Transmission standby</p>
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="bg-white p-6 rounded-[2rem] border border-slate-100 shadow-sm flex items-start gap-4">
-                    <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
-                      <Radio size={20} />
-                    </div>
-                    <div>
-                      <h4 className="text-[10px] font-black text-slate-900 uppercase tracking-widest mb-1">Briefing</h4>
-                      <p className="text-[10px] text-slate-500 font-medium leading-relaxed uppercase tracking-tight">
-                        Share the code <span className="text-indigo-600 font-black font-mono">{partyState.code}</span> with your team. Only the leader can initiate the mission.
-                      </p>
+                    {/* Language */}
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 flex items-center gap-1.5">
+                        <Globe size={12} /> Language
+                      </label>
+                      <select
+                        value={partyState.settings.language}
+                        onChange={(e) => updateSettings({ ...partyState.settings, language: e.target.value })}
+                        className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/40 cursor-pointer"
+                      >
+                        <option value="english">🇬🇧 English</option>
+                        <option value="spanish">🇪🇸 Spanish</option>
+                        <option value="french">🇫🇷 French</option>
+                        <option value="german">🇩🇪 German</option>
+                        <option value="romanian">🇷🇴 Romanian</option>
+                      </select>
                     </div>
                   </div>
-                </div>
+                )}
               </div>
+            )}
+
+            {/* Spacer */}
+            <div className="flex-1 min-h-4" />
+
+            {/* Start / waiting */}
+            {isLeader ? (
+              <button
+                onClick={handleStart}
+                disabled={currentPlayers < 3}
+                data-testid="btn-start-game"
+                className="w-full py-4 bg-indigo-600 text-white font-black rounded-2xl text-lg uppercase tracking-wider transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-3 shadow-lg shadow-indigo-900/40"
+              >
+                <Zap size={20} /> Start Game
+              </button>
             ) : (
-              /* Manage Tab (Leader Only) */
-              <div className="w-full max-w-2xl mx-auto space-y-6 animate-in fade-in slide-in-from-right-4 duration-300">
-                <div className="bg-white p-8 md:p-12 rounded-[3rem] shadow-sm border border-slate-100 space-y-12">
-                  <div className="flex items-center justify-between">
-                    <h2 className="text-[12px] font-black uppercase tracking-[0.4em] text-slate-400 flex items-center gap-3">
-                      <Settings2 size={18} className="text-indigo-500" />
-                      Protocol Settings
-                    </h2>
-                  </div>
-                  
-                  {/* Max Players */}
-                  <div className="space-y-6">
-                    <div className="flex justify-between items-end">
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">Max Capacity</label>
-                        <p className="text-[10px] text-slate-300 font-bold px-1 uppercase italic tracking-tighter">Total slot availability</p>
-                      </div>
-                      <span className="text-4xl font-black text-indigo-600 italic px-2 tracking-tighter">{localSettings.maxPlayers}</span>
-                    </div>
-                    <div className="relative pt-2">
-                      <input 
-                        type="range" min="3" max="10" step="1"
-                        data-testid="slider-max-players"
-                        title="Max Players"
-                        value={localSettings.maxPlayers}
-                        onChange={(e) => setLocalSettings(prev => ({ ...prev, maxPlayers: parseInt(e.target.value) }))}
-                        className="w-full h-2 bg-slate-100 rounded-full appearance-none cursor-pointer accent-indigo-600 custom-slider"
-                      />
-                      <div className="flex justify-between mt-3 text-[9px] font-black text-slate-300 uppercase tracking-widest px-1">
-                        <span>3 MIN</span>
-                        <span>10 MAX</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Imposter Count */}
-                  <div className="space-y-6">
-                    <div className="flex justify-between items-end">
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest px-1">Imposter Quota</label>
-                        <p className="text-[10px] text-slate-300 font-bold px-1 uppercase italic tracking-tighter">Active hostiles in field</p>
-                      </div>
-                      <span className="text-4xl font-black text-rose-600 italic px-2 tracking-tighter">{localSettings.impostersCount}</span>
-                    </div>
-                    <div className="relative pt-2">
-                      <input 
-                        type="range" min="1" max={maxAllowedImposters} step="1"
-                        data-testid="slider-imposter-count"
-                        title="Imposter Count"
-                        value={localSettings.impostersCount}
-                        onChange={(e) => setLocalSettings(prev => ({ ...prev, impostersCount: parseInt(e.target.value) }))}
-                        className="w-full h-2 bg-slate-100 rounded-full appearance-none cursor-pointer accent-rose-600 custom-slider"
-                      />
-                      <div className="flex justify-between mt-3 text-[9px] font-black text-slate-300 uppercase tracking-widest px-1">
-                        <span>1 MIN</span>
-                        <span>{maxAllowedImposters} MAX</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <button 
-                    onClick={handleUpdateSettings}
-                    data-testid="btn-save-settings"
-                    disabled={isSaving}
-                    className="w-full py-5 bg-slate-900 text-white font-black rounded-2xl text-sm uppercase tracking-[0.3em] shadow-xl active:scale-95 transition-all flex items-center justify-center gap-3 overflow-hidden group"
-                  >
-                    {isSaving ? <RefreshCw size={18} className="animate-spin" /> : (
-                      <>
-                        <ShieldAlert size={18} className="group-hover:rotate-12 transition-transform" />
-                        Save Protocols
-                      </>
-                    )}
-                  </button>
-                </div>
-
-                <div className="bg-rose-50/50 p-8 md:p-10 rounded-[3rem] border border-rose-100 flex flex-col md:flex-row items-center justify-between gap-6">
-                  <div className="space-y-2 text-center md:text-left">
-                    <h3 className="text-[11px] font-black uppercase tracking-[0.4em] text-rose-500">Operation Termination</h3>
-                    <p className="text-[10px] font-bold text-rose-400 uppercase tracking-tight leading-relaxed max-w-xs">
-                      End the party session for all agents. This action is irreversible.
-                    </p>
-                  </div>
-                  <button 
-                    onClick={handleLeaveAndEnd}
-                    data-testid="btn-disband"
-                    className="w-full md:w-auto px-10 py-5 bg-rose-600 text-white font-black rounded-2xl text-xs uppercase tracking-[0.2em] shadow-xl shadow-rose-200 active:scale-95 transition-all flex items-center justify-center gap-2 group"
-                  >
-                    <LogOut size={18} />
-                    LEAVE & END PARTY
-                  </button>
-                </div>
+              <div className="w-full py-4 bg-slate-900 rounded-2xl border border-slate-800 flex items-center justify-center gap-3">
+                <div className="w-2 h-2 bg-slate-700 rounded-full animate-pulse" />
+                <p className="text-xs font-black text-slate-600 uppercase tracking-widest">Waiting for host…</p>
               </div>
             )}
           </div>
         )}
 
-        {/* Existing Phases (Countdown, Reveal, Round, Results) */}
-        {partyState.game.phase === GamePhase.COUNTDOWN && (
-          <div className="text-center animate-in zoom-in duration-300">
-            <h2 className="text-xs font-black uppercase tracking-[0.4em] text-slate-400 mb-10 animate-pulse">Establishing Identity...</h2>
-            <div className="text-[14rem] font-black leading-none text-indigo-600 italic tracking-tighter drop-shadow-2xl" data-testid="timer-display">
+        {/* PREGAME – Ready Check ──────────────────────────────────────────── */}
+        {phase === GamePhase.PREGAME && (
+          <div className="flex-1 flex flex-col p-4 gap-4 overflow-y-auto">
+            <div className="text-center pt-6 pb-2">
+              <p className="text-[10px] font-black uppercase tracking-[0.4em] text-indigo-500 mb-3">Ready Check</p>
+              <div className="text-8xl font-black text-white tabular-nums" data-testid="timer-display">
+                {partyState.game.remainingTime}s
+              </div>
+              <p className="text-slate-500 text-sm font-bold mt-2">
+                {partyState.startVotes.length} / {partyState.players.filter(p => p.connected).length} ready
+              </p>
+            </div>
+
+            <div className="space-y-2 flex-1 overflow-y-auto">
+              {partyState.players.filter(p => p.connected).map(p => {
+                const votedStart = partyState.startVotes.includes(p.id);
+                const votedCancel = partyState.cancelVotes.includes(p.id);
+                return (
+                  <div key={p.id} className={`flex items-center gap-3 p-3 rounded-2xl border ${votedStart ? 'bg-emerald-900/20 border-emerald-800/50' : votedCancel ? 'bg-rose-900/20 border-rose-800/50' : 'bg-slate-900 border-slate-800'}`}>
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-black text-base shrink-0 ${votedStart ? 'bg-emerald-600 text-white' : votedCancel ? 'bg-rose-600 text-white' : 'bg-slate-800 text-slate-400'}`}>
+                      {votedStart ? '✓' : votedCancel ? '✗' : p.name[0].toUpperCase()}
+                    </div>
+                    <span className="font-black text-white">{p.name}</span>
+                    {p.isLeader && <Crown size={12} className="text-amber-500 ml-auto shrink-0" />}
+                    {!votedStart && !votedCancel && !p.isLeader && (
+                      <span className="ml-auto text-[9px] text-slate-600 font-black uppercase tracking-widest">Deciding…</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {!hasPregameVoted && !isLeader ? (
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  onClick={() => cancelStart()}
+                  className="py-4 bg-slate-800 text-slate-300 font-black rounded-2xl text-base uppercase tracking-wide active:scale-95 transition-transform border border-slate-700 active:bg-rose-900/30 active:text-rose-400"
+                >
+                  ✗ Not Yet
+                </button>
+                <button
+                  onClick={() => voteStart()}
+                  className="py-4 bg-emerald-600 text-white font-black rounded-2xl text-base uppercase tracking-wide active:scale-95 transition-transform shadow-lg shadow-emerald-900/40"
+                >
+                  ✓ Ready!
+                </button>
+              </div>
+            ) : (
+              <div className="py-4 bg-slate-900 rounded-2xl border border-slate-800 text-center">
+                <p className="text-sm font-black text-slate-500 uppercase tracking-widest">
+                  {hasVotedStart ? '✓ You are ready' : hasVotedCancel ? '✗ You voted not yet' : '★ You started the vote'}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* COUNTDOWN ─────────────────────────────────────────────────────── */}
+        {phase === GamePhase.COUNTDOWN && (
+          <div className="flex-1 flex flex-col items-center justify-center gap-4">
+            <p className="text-[10px] font-black uppercase tracking-[0.5em] text-slate-600 animate-pulse">Game starts in</p>
+            <div className="text-[12rem] font-black leading-none text-indigo-500 italic tracking-tighter drop-shadow-2xl" data-testid="timer-display">
               {partyState.game.remainingTime}
             </div>
           </div>
         )}
 
-        {partyState.game.phase === GamePhase.REVEAL && (
-          <div className="w-full space-y-8 animate-in fade-in zoom-in duration-500">
-            <h2 className="text-center text-xs font-black uppercase tracking-[0.4em] text-slate-400">Classified Dossier</h2>
-            <div className={`p-10 rounded-[3rem] shadow-2xl ${me?.role === 'imposter' ? 'bg-rose-600 text-white shadow-rose-200' : 'bg-slate-900 text-white shadow-slate-300'}`}>
-              <div className="flex justify-center mb-8">
-                <div className={`w-20 h-20 rounded-[2rem] border-4 flex items-center justify-center rotate-3 shadow-lg ${me?.role === 'imposter' ? 'border-rose-400/50 bg-rose-500' : 'border-slate-700 bg-slate-800'}`}>
-                  {me?.role === 'imposter' ? <ShieldAlert size={40} /> : <Users size={40} />}
-                </div>
+        {/* REVEAL ─────────────────────────────────────────────────────────── */}
+        {phase === GamePhase.REVEAL && (
+          <div className="flex-1 flex flex-col items-center justify-center p-4">
+            <div className={`w-full max-w-sm p-8 rounded-[3rem] shadow-2xl border-2 flex flex-col items-center gap-6 ${me?.role === 'imposter' ? 'bg-rose-950/20 border-rose-900/50' : 'bg-slate-900 border-slate-800'}`}>
+              <div className={`w-20 h-20 rounded-[1.5rem] flex items-center justify-center shadow-2xl ${me?.role === 'imposter' ? 'bg-rose-600' : 'bg-indigo-600'}`}>
+                {me?.role === 'imposter'
+                  ? <ShieldAlert size={40} className="animate-pulse text-white" />
+                  : <Users size={40} className="text-white" />}
               </div>
-              <div className="text-center italic font-black text-7xl tracking-tighter mb-6 leading-none" data-testid="role-reveal">
-                {me?.role === 'imposter' ? 'IMPOSTER' : 'CREW'}
+              <div className="text-center space-y-1">
+                <p className={`text-[10px] font-black uppercase tracking-[0.4em] ${me?.role === 'imposter' ? 'text-rose-500' : 'text-indigo-400'}`}>You are the</p>
+                <p className="text-5xl font-black italic text-white tracking-tighter" data-testid="role-reveal">
+                  {me?.role === 'imposter' ? 'INFILTRATOR' : 'FIELD AGENT'}
+                </p>
               </div>
-              <div className="h-px bg-white/10 my-10"></div>
-              {me?.role === 'imposter' ? (
-                <div className="space-y-6">
-                  <p className="text-[10px] font-black uppercase tracking-[0.3em] text-rose-200 text-center opacity-70">CONFIDENTIAL INTEL:</p>
-                  <div className="bg-rose-500/50 p-6 rounded-3xl border-2 border-white/10 backdrop-blur-sm">
-                    <p className="text-4xl font-black italic text-center break-words leading-tight" data-testid="reveal-hint">&quot;{partyState.game.hint}&quot;</p>
-                  </div>
-                  <p className="text-xs text-rose-100 font-bold leading-relaxed text-center opacity-80 px-4">
-                    Infiltrate the conversation. Do not reveal your source material.
-                  </p>
-                </div>
-              ) : (
-                <div className="text-center space-y-6">
-                  <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-500 text-center opacity-70">CONFIDENTIAL WORD:</p>
-                  <div className="bg-slate-800 p-6 rounded-3xl border-2 border-white/5">
-                    <p className="text-4xl font-black italic text-center break-words leading-tight text-white" data-testid="reveal-word">&quot;{partyState.game.secretWord}&quot;</p>
-                  </div>
-                  <p className="text-xs text-slate-400 font-bold leading-relaxed px-4">
-                    The imposter has a hint but doesn't know the word. Expose the fraud.
-                  </p>
+              {partyState.game.category && (
+                <div className="w-full bg-slate-800/50 rounded-2xl p-4 text-center border border-slate-700/50">
+                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-1">Category</p>
+                  <p className="text-xl font-black text-white">{partyState.game.category}</p>
                 </div>
               )}
+              <div className={`w-full rounded-2xl p-5 text-center border ${me?.role === 'imposter' ? 'bg-rose-900/30 border-rose-800/30' : 'bg-indigo-950/30 border-indigo-900/30'}`}>
+                <p className={`text-[9px] font-black uppercase tracking-widest mb-2 ${me?.role === 'imposter' ? 'text-rose-500' : 'text-indigo-400'}`}>
+                  {me?.role === 'imposter' ? 'Your Hint' : 'Your Word'}
+                </p>
+                <p className="text-4xl font-black italic text-white tracking-tight break-words leading-tight" data-testid={me?.role === 'imposter' ? 'reveal-hint' : 'reveal-word'}>
+                  &quot;{me?.role === 'imposter' ? partyState.game.hint : partyState.game.secretWord}&quot;
+                </p>
+              </div>
+              <p className={`text-xs text-center leading-relaxed px-2 ${me?.role === 'imposter' ? 'text-rose-300/50' : 'text-slate-500'}`}>
+                {me?.role === 'imposter'
+                  ? 'Blend in. Give vague clues. Do not reveal you are an infiltrator.'
+                  : 'Give hints about your word without saying it. Spot the odd one out.'}
+              </p>
             </div>
           </div>
         )}
 
-        {partyState.game.phase === GamePhase.ROUND && (
-          <div className="w-full space-y-10 animate-in fade-in duration-500">
-            <div className="text-center space-y-4">
-              <div className="inline-flex items-center gap-2 px-6 py-2 bg-indigo-50 text-indigo-600 rounded-full font-black text-[10px] uppercase tracking-[0.2em] shadow-sm">
-                <Radio size={14} className="animate-pulse" />
-                Open Frequency
-              </div>
-              <div className={`text-9xl font-black italic leading-none transition-all duration-500 tracking-tighter flex items-center justify-center gap-2 ${partyState.game.remainingTime < 30 ? 'text-rose-500 scale-105' : 'text-slate-900'}`}>
-                <Timer size={48} strokeWidth={3} className="opacity-10" />
-                <span data-testid="timer-display">
-                  {Math.floor(partyState.game.remainingTime / 60)}:{(partyState.game.remainingTime % 60).toString().padStart(2, '0')}
-                </span>
-              </div>
-            </div>
-
-            {/* Voting Section */}
-            <div className="flex flex-col items-center">
-              {/* Player Voting Section */}
-              <div className="bg-slate-900 p-8 rounded-[3rem] shadow-2xl shadow-slate-300 w-full max-w-2xl flex flex-col">
-                <div className="flex justify-between items-center mb-8">
-                  <h3 className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-500">Expose Hostile</h3>
-                  <div className="bg-rose-600 text-white text-[10px] font-black px-4 py-2 rounded-xl italic shadow-md shadow-rose-900/50">
-                    {Object.keys(partyState.votes.votes).length} / {partyState.players.length} SUBMITTED
+        {/* ROUND + VOTING_GRACE ───────────────────────────────────────────── */}
+        {(phase === GamePhase.ROUND || phase === GamePhase.VOTING_GRACE) && (
+          <div className="flex-1 flex flex-col overflow-hidden">
+            {showChat ? (
+              <ChatPanel
+                partyState={partyState} playerId={playerId} chatInput={chatInput}
+                setChatInput={setChatInput} handleSendMessage={handleSendMessage}
+                messagesEndRef={messagesEndRef} onClose={() => setShowChat(false)}
+              />
+            ) : (
+              <div className="flex-1 flex flex-col p-4 gap-4 overflow-y-auto">
+                {/* Timer */}
+                <div className="text-center space-y-2">
+                  <div className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest border ${phase === GamePhase.VOTING_GRACE ? 'bg-rose-950/50 border-rose-700 text-rose-400 animate-pulse' : 'bg-indigo-950/50 border-indigo-900 text-indigo-400'}`}>
+                    <Radio size={10} className="animate-pulse" />
+                    {phase === GamePhase.VOTING_GRACE ? 'Vote now!' : 'Discussion'}
+                  </div>
+                  <div className={`text-7xl font-black italic leading-none tracking-tighter tabular-nums ${partyState.game.remainingTime < 30 ? 'text-rose-500' : 'text-white'}`} data-testid="timer-display">
+                    {Math.floor(partyState.game.remainingTime / 60)}:{(partyState.game.remainingTime % 60).toString().padStart(2, '0')}
                   </div>
                 </div>
-                
-                <div className="space-y-3 mb-8">
+
+                {/* Vote header */}
+                <div className="flex justify-between items-center">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                    {me?.isDead ? 'Spectating' : 'Vote out the imposter'}
+                  </p>
+                  <span className="text-[10px] font-black text-rose-500">
+                    {Object.keys(partyState.votes.votes).length}/{partyState.players.filter(p => !p.isDead).length} voted
+                  </span>
+                </div>
+
+                {/* Vote grid */}
+                <div className={`grid grid-cols-2 gap-2 ${me?.isDead ? 'opacity-50 pointer-events-none' : ''}`}>
                   {partyState.players.map(p => {
                     const isSelf = p.id === playerId;
-                    const hasVotedThisPerson = partyState.votes.votes[playerId || ''] === p.id;
-                    const alreadyVoted = !!partyState.votes.votes[playerId || ''];
-
+                    const hasVotedThis = partyState.votes.votes[playerId ?? ''] === p.id;
+                    const alreadyVoted = !!partyState.votes.votes[playerId ?? ''];
                     return (
                       <button
                         key={p.id}
-                        disabled={isSelf || alreadyVoted}
+                        disabled={isSelf || alreadyVoted || me?.isDead || p.isDead}
                         onClick={() => onVotePlayer(p.id)}
-                        className={`w-full p-4 rounded-2xl flex items-center justify-between transition-all group ${
-                          isSelf ? 'bg-white/5 opacity-50 cursor-not-allowed' : 
-                          hasVotedThisPerson ? 'bg-rose-600 shadow-lg shadow-rose-900/50 border-2 border-rose-400' :
-                          alreadyVoted ? 'bg-white/5 opacity-40 cursor-not-allowed' :
-                          'bg-white/10 hover:bg-white/15 border-2 border-transparent hover:border-white/20'
+                        className={`p-3 rounded-2xl flex items-center gap-2 transition-all active:scale-95 ${
+                          isSelf ? 'bg-slate-800/30 opacity-40 cursor-not-allowed' :
+                          p.isDead ? 'bg-rose-950/10 opacity-30 cursor-not-allowed' :
+                          hasVotedThis ? 'bg-rose-900/50 border-2 border-rose-500 text-white shadow-lg' :
+                          alreadyVoted || me?.isDead ? 'bg-slate-800/20 opacity-40 cursor-not-allowed' :
+                          'bg-slate-800 border border-slate-700 active:bg-slate-700'
                         }`}
                       >
-                        <div className="flex items-center gap-4">
-                          <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-black ${hasVotedThisPerson ? 'bg-rose-400 text-rose-950' : 'bg-white/10 text-white'}`}>
-                            {p.name[0].toUpperCase()}
-                          </div>
-                          <span className={`font-bold tracking-tight ${hasVotedThisPerson ? 'text-white' : 'text-slate-300'}`}>
-                            {p.name}
-                          </span>
+                        <div className={`w-9 h-9 rounded-xl shrink-0 flex items-center justify-center font-black text-sm ${hasVotedThis ? 'bg-rose-500 text-white' : 'bg-slate-700 text-slate-300'}`}>
+                          {p.name[0].toUpperCase()}
                         </div>
-                        {hasVotedThisPerson && <CheckCircle2 size={20} className="text-white" />}
-                        {!alreadyVoted && !isSelf && <ShieldAlert size={18} className="text-white/20 group-hover:text-rose-400 transition-colors" />}
+                        <span className={`font-black text-sm truncate ${hasVotedThis ? 'text-white' : 'text-slate-300'} ${p.isDead ? 'line-through' : ''}`}>{p.name}</span>
+                        {hasVotedThis && <CheckCircle2 size={14} className="text-rose-400 ml-auto shrink-0" />}
                       </button>
                     );
                   })}
                 </div>
-                
-                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-tight text-center italic">
-                  Majority rules. Ties result in no elimination.
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
 
-        {partyState.game.phase === GamePhase.RESULTS && (
-          <div className="w-full text-center space-y-12 animate-in fade-in slide-in-from-bottom-8 duration-700">
-            <div className="space-y-4">
-              <div className={`inline-block px-10 py-4 rounded-[2rem] font-black italic text-4xl tracking-tighter shadow-xl ${partyState.game.winner === 'imposter' ? 'bg-rose-600 text-white shadow-rose-200' : 'bg-emerald-600 text-white shadow-emerald-200'}`}>
-                {partyState.game.winner === 'imposter' ? 'IMPOSTERS DOMINATED' : 'NETWORK SECURED'}
-              </div>
-              <h2 className="text-8xl font-black italic tracking-tighter text-slate-900 leading-none" data-testid="results-title">MISSION<br/>COMPLETE</h2>
-              <p className="text-slate-400 font-bold uppercase tracking-[0.4em] text-[10px]">Debriefing Report</p>
-            </div>
-            
-            {partyState.game.lastEliminated && (
-              <div className="bg-white p-6 rounded-[2rem] border-2 border-slate-100 italic font-bold text-slate-500 uppercase tracking-widest text-sm">
-                Last person to leave: <span className="text-indigo-600">{partyState.game.lastEliminated === 'TIE' ? 'NO ONE (TIE)' : partyState.players.find(p => p.id === partyState.game.lastEliminated)?.name || 'UNKNOWN'}</span>
+                <div className="flex-1 min-h-2" />
+
+                {/* Skip vote + chat toggle */}
+                <div className="flex gap-2">
+                  {phase === GamePhase.ROUND && !me?.isDead && (
+                    <button
+                      onClick={() => voteSkip()}
+                      disabled={partyState.votes.votedSkip.includes(playerId ?? '')}
+                      className="flex-1 py-3 bg-slate-800 text-slate-400 font-black rounded-xl text-xs uppercase tracking-widest border border-slate-700 disabled:opacity-40 disabled:cursor-not-allowed active:bg-amber-900/20 active:text-amber-400 transition-colors"
+                    >
+                      {partyState.votes.votedSkip.includes(playerId ?? '')
+                        ? '✓ Skip voted'
+                        : `Skip ${partyState.votes.votedSkip.length}/${partyState.votes.threshold}`}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setShowChat(true)}
+                    className="py-3 px-4 bg-slate-800 text-slate-400 font-black rounded-xl text-xs uppercase tracking-widest border border-slate-700 active:bg-indigo-900/30 active:text-indigo-400 transition-colors flex items-center gap-2 relative"
+                  >
+                    <MessageSquare size={16} />
+                    {msgCount > 0 && (
+                      <span className="absolute -top-1 -right-1 w-4 h-4 bg-indigo-500 rounded-full text-[9px] text-white flex items-center justify-center font-black">
+                        {msgCount > 9 ? '9+' : msgCount}
+                      </span>
+                    )}
+                  </button>
+                </div>
               </div>
             )}
-
-            <div className="bg-slate-900 p-10 rounded-[4rem] text-white shadow-2xl shadow-slate-400 relative overflow-hidden">
-              <div className="absolute -top-10 -right-10 opacity-10">
-                <ShieldAlert size={120} />
-              </div>
-              <h3 className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-500 mb-8 italic">Compromised Agents</h3>
-              <div className="flex flex-wrap justify-center gap-4 mb-14 relative z-10">
-                {partyState.players.filter(p => p.role === 'imposter').map(p => (
-                  <div key={p.id} className="bg-rose-600 px-8 py-4 rounded-[2rem] shadow-xl shadow-rose-900/50 rotate-2" data-testid="result-imposter-row">
-                    <span className="text-2xl font-black italic tracking-tighter uppercase">{p.name}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="pt-10 border-t border-white/5 relative z-10 grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-500 mb-4">The Secret Word:</p>
-                  <div className="bg-white/5 p-6 rounded-3xl border border-white/5">
-                    <p className="text-4xl font-black italic text-indigo-400 tracking-tight leading-tight" data-testid="result-word">&quot;{partyState.game.secretWord}&quot;</p>
-                  </div>
-                </div>
-                <div>
-                  <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-500 mb-4">The Imposter's Hint:</p>
-                  <div className="bg-white/5 p-6 rounded-3xl border border-white/5">
-                    <p className="text-2xl font-black italic text-rose-400 tracking-tight leading-tight" data-testid="result-hint">&quot;{partyState.game.hint}&quot;</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div className="space-y-6 pt-6">
-              <div className="flex flex-col items-center gap-2 mb-4">
-                <span className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em]">Returning to Lobby in</span>
-                <span className="text-3xl font-black text-indigo-600 italic tracking-tighter" data-testid="results-countdown">{partyState.game.remainingTime}s</span>
-              </div>
-              {isLeader ? (
-                <button 
-                  onClick={handleStart}
-                  disabled={isStarting}
-                  data-testid="btn-play-again"
-                  className="group w-full py-7 bg-indigo-600 text-white font-black rounded-[2.5rem] text-2xl shadow-2xl shadow-indigo-100 active:scale-95 transition-all flex items-center justify-center gap-3 tracking-tighter"
-                >
-                  {isStarting ? (
-                    <div className="w-8 h-8 border-4 border-white/30 border-t-white rounded-full animate-spin" />
-                  ) : (
-                    <>
-                      <RotateCcw size={24} />
-                      IMMEDIATE RESTART
-                    </>
-                  )}
-                </button>
-              ) : (
-                <div className="p-8 bg-white rounded-[3rem] border border-slate-100 flex items-center justify-center gap-4">
-                  <div className="w-2 h-2 bg-indigo-600 rounded-full animate-ping"></div>
-                  <p className="text-slate-400 font-black italic animate-pulse tracking-wide">Stand by for Redirection...</p>
-                </div>
-              )}
-              <button 
-                onClick={() => router.push('/')}
-                className="group inline-flex items-center gap-2 text-xs font-black text-slate-400 hover:text-indigo-600 transition-colors uppercase tracking-[0.3em] py-2"
-              >
-                <HomeIcon size={14} />
-                Return to HQ
-              </button>
-            </div>
           </div>
         )}
-      </div>
 
-      <div className="mt-14 text-center">
-        {partyState.game.phase === GamePhase.ROUND && (
-          <div className="p-6 bg-white rounded-[2rem] border border-slate-100 shadow-sm flex gap-4 items-start text-left">
-            <div className="p-2 bg-amber-50 text-amber-500 rounded-xl">
-              <AlertCircle size={20} />
+        {/* VOTE RESULTS ───────────────────────────────────────────────────── */}
+        {phase === GamePhase.VOTE_RESULTS && (
+          <div className="flex-1 flex flex-col items-center justify-center p-4 gap-8">
+            <p className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-600 animate-pulse">Voting result</p>
+            <div className={`px-10 py-10 rounded-[3rem] shadow-2xl border-2 font-black italic text-6xl tracking-tighter text-white text-center max-w-xs w-full ${partyState.game.lastEliminated === 'TIE' ? 'bg-slate-800 border-slate-700' : 'bg-rose-600/20 border-rose-500'}`}>
+              {partyState.game.lastEliminated === 'TIE'
+                ? 'TIE!'
+                : partyState.players.find(p => p.id === partyState.game.lastEliminated)?.name ?? '?'}
             </div>
-            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-tight leading-relaxed">
-              Maintain operational security. Ask indirect questions to confirm fellow agents' knowledge without exposing the intel to hostiles.
+            <p className="text-2xl font-black italic text-white uppercase tracking-tight text-center">
+              {partyState.game.lastEliminated === 'TIE' ? 'No one was eliminated' : 'Has been eliminated'}
             </p>
+            <p className="text-sm text-slate-600 font-black uppercase tracking-widest">{partyState.game.remainingTime}s</p>
           </div>
         )}
+
+        {/* RESULTS ────────────────────────────────────────────────────────── */}
+        {phase === GamePhase.RESULTS && (
+          <div className="flex-1 flex flex-col p-4 gap-5 overflow-y-auto">
+            {/* Winner banner */}
+            <div className={`py-5 px-6 rounded-3xl font-black text-3xl italic text-center tracking-tighter border ${partyState.game.winner === 'imposter' ? 'bg-rose-900/30 border-rose-500 text-rose-400' : 'bg-emerald-900/30 border-emerald-500 text-emerald-400'}`}>
+              {partyState.game.winner === 'imposter' ? '⚡ Infiltrators Win!' : '✓ Crew Wins!'}
+            </div>
+
+            {/* Word reveal card */}
+            <div className="bg-slate-900 rounded-3xl border border-slate-800 p-5 space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <p className="text-[9px] font-black uppercase tracking-widest text-indigo-400">The Word</p>
+                  <p className="text-2xl font-black italic text-white break-words">&quot;{partyState.game.secretWord}&quot;</p>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-[9px] font-black uppercase tracking-widest text-rose-400">Imposter Hint</p>
+                  <p className="text-lg font-black italic text-slate-300 break-words">&quot;{partyState.game.hint}&quot;</p>
+                </div>
+              </div>
+              <div className="border-t border-slate-800 pt-4">
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-2">The Infiltrators</p>
+                <div className="flex flex-wrap gap-2">
+                  {partyState.players.filter(p => p.role === 'imposter').map(p => (
+                    <span key={p.id} className="px-3 py-1 bg-rose-900/40 border border-rose-800 rounded-xl font-black text-rose-300 text-sm">{p.name}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Play again / lobby vote */}
+            <div className="space-y-2">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-600 text-center">
+                {partyState.continueVotes.length + partyState.lobbyVotes.length} / {partyState.players.filter(p => p.connected).length} voted
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  onClick={() => voteContinue()}
+                  disabled={partyState.continueVotes.includes(playerId ?? '') || partyState.lobbyVotes.includes(playerId ?? '')}
+                  className={`py-4 rounded-2xl font-black text-lg uppercase tracking-wide transition-all active:scale-95 flex items-center justify-center gap-2 ${
+                    partyState.continueVotes.includes(playerId ?? '') ? 'bg-slate-900 border-2 border-indigo-500 text-indigo-400' :
+                    partyState.lobbyVotes.includes(playerId ?? '') ? 'bg-slate-900 text-slate-700 cursor-not-allowed opacity-50' :
+                    'bg-indigo-600 text-white shadow-lg shadow-indigo-900/30'
+                  }`}
+                >
+                  <RotateCcw size={18} /> Play Again
+                </button>
+                <button
+                  onClick={() => voteLobby()}
+                  disabled={partyState.continueVotes.includes(playerId ?? '') || partyState.lobbyVotes.includes(playerId ?? '')}
+                  className={`py-4 rounded-2xl font-black text-lg uppercase tracking-wide transition-all active:scale-95 flex items-center justify-center gap-2 ${
+                    partyState.lobbyVotes.includes(playerId ?? '') ? 'bg-slate-900 border-2 border-rose-500 text-rose-400' :
+                    partyState.continueVotes.includes(playerId ?? '') ? 'bg-slate-900 text-slate-700 cursor-not-allowed opacity-50' :
+                    'bg-slate-800 text-slate-300 border border-slate-700'
+                  }`}
+                >
+                  <HomeIcon size={18} /> Lobby
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
     </main>
   );

@@ -1,8 +1,11 @@
 export enum GamePhase {
   LOBBY = 'lobby',
+  PREGAME = 'pregame',     // Confirmation vote before starting
   COUNTDOWN = 'countdown',
   REVEAL = 'reveal',
   ROUND = 'round',
+  VOTING_GRACE = 'voting_grace',
+  VOTE_RESULTS = 'vote_results',
   RESULTS = 'results'
 }
 
@@ -14,6 +17,15 @@ export interface Player {
   role: 'imposter' | 'crew' | null;
   connected: boolean;
   disconnectedAt: number | null; // Timestamp
+  isDead?: boolean; // If they were voted out but are still in the game
+}
+
+export interface ChatMessage {
+  id: string;
+  playerId: string | 'system';
+  playerName: string;
+  text: string;
+  timestamp: number;
 }
 
 export interface VoteState {
@@ -27,7 +39,8 @@ export interface GameState {
   remainingTime: number;
   imposterCount: number;
   secretWord: string | null; // Shared word for crew
-  hint: string | null;  // Shared hint for imposters
+  hint: string | null;       // Shared hint for imposters
+  category: string | null;   // Shown to everyone — narrows the domain
   lastEliminated: string | null; // ID of last person voted out
   winner: 'imposter' | 'crew' | null;
 }
@@ -35,6 +48,7 @@ export interface GameState {
 export interface PartySettings {
   maxPlayers: number;
   impostersCount: number;
+  language: string; // e.g. 'english' | 'spanish' | 'french' | 'german' | 'romanian'
 }
 
 export interface Party {
@@ -43,6 +57,11 @@ export interface Party {
   game: GameState;
   votes: VoteState;
   settings: PartySettings;
+  messages: ChatMessage[];
+  continueVotes: string[]; // Player IDs who want to play again
+  lobbyVotes: string[];    // Player IDs who want to go back to lobby
+  startVotes: string[];    // Player IDs who confirmed the pre-game start
+  cancelVotes: string[];   // Player IDs who declined the pre-game start
 }
 
 export interface ClientToServerEvents {
@@ -60,6 +79,12 @@ export interface ClientToServerEvents {
 
   /** Vote for a player to be eliminated. */
   vote_player: (targetId: string) => void;
+
+  /** Vote to continue game/play again. */
+  vote_continue: () => void;
+
+  /** Vote to return to lobby. */
+  vote_lobby: () => void;
   
   /** Explicitly request the latest state (for reconnects). */
   "state:sync": () => void;
@@ -72,6 +97,21 @@ export interface ClientToServerEvents {
 
   /** Leave the party. */
   "party:leave": () => void;
+
+  /** Kick a player from the party (Leader only). */
+  kick_player: (targetId: string) => void;
+
+  /** Send a chat message. */
+  send_message: (text: string) => void;
+
+  /** Leader proposes to start — begins the pre-game confirmation vote. */
+  propose_game: () => void;
+
+  /** Vote to confirm start during the pre-game phase. */
+  vote_start: () => void;
+
+  /** Vote to cancel start during the pre-game phase (returns to lobby). */
+  cancel_start: () => void;
 }
 
 export interface ServerToClientEvents {
@@ -86,6 +126,9 @@ export interface ServerToClientEvents {
   
   /** Success confirmation for party creation. */
   party_created: (code: string) => void;
+
+  /** New chat message received. */
+  chat_message: (message: ChatMessage) => void;
 
   /** Countdown tick event 5..1 */
   countdown_tick: (seconds: number) => void;
