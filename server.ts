@@ -28,7 +28,6 @@ function getSafeState(party: Party, playerId: string): Party {
     game: {
       ...party.game,
       secretWord: (me?.role === 'crew' || isGameOver) ? party.game.secretWord : null,
-      hint: (isImposter || isGameOver) ? party.game.hint : null,
     }
   };
 }
@@ -120,7 +119,7 @@ app.prepare().then(() => {
       if (result.shouldStart) {
         const { party } = result;
         const mission = getRandomWord(party.settings.language || 'english');
-        gameEngine.startGame(party.code, party.settings.impostersCount, mission.word, mission.hint, mission.category);
+        gameEngine.startGame(party.code, party.settings.impostersCount, mission.word, mission.category);
         console.log(`[Game] Starting party ${party.code} | word: ${mission.word} | lang: ${party.settings.language}`);
       }
       broadcastState(result.party.code);
@@ -208,7 +207,7 @@ app.prepare().then(() => {
       if (result) {
         if (result.consensus === 'continue') {
           const mission = getRandomWord(result.party.settings.language || 'english');
-          gameEngine.startGame(result.party.code, result.party.settings.impostersCount, mission.word, mission.hint, mission.category);
+          gameEngine.startGame(result.party.code, result.party.settings.impostersCount, mission.word, mission.category);
         }
         broadcastState(result.party.code);
       }

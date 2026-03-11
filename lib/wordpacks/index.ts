@@ -7,7 +7,6 @@ import romanian from './romanian.json';
 export interface WordEntry {
   category: string;
   civilian_word: string;
-  imposter_hint: string;
 }
 
 export const SUPPORTED_LANGUAGES = ['english', 'spanish', 'french', 'german', 'romanian'] as const;
@@ -25,12 +24,11 @@ export function getWordPack(language: string): WordEntry[] {
   return packs[language as SupportedLanguage] ?? packs.english;
 }
 
-export function getRandomWord(language: string): { word: string; hint: string; category: string } {
+export function getRandomWord(language: string): { word: string; category: string } {
   const pack = getWordPack(language);
   const entry = pack[Math.floor(Math.random() * pack.length)];
   return {
     word: entry.civilian_word,
-    hint: entry.imposter_hint,
     category: entry.category,
   };
 }

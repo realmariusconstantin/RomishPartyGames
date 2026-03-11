@@ -12,7 +12,7 @@ import {
 
 interface GameContextType {
   partyState: Party | null;
-  roleInfo: { role: 'imposter' | 'crew'; hint: string | null } | null;
+  roleInfo: { role: 'imposter' | 'crew' } | null;
   error: string | null;
   socketId: string | null;
   playerId: string | null;
@@ -42,7 +42,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
   const [partyState, setPartyState] = useState<Party | null>(null);
-  const [roleInfo, setRoleInfo] = useState<{ role: 'imposter' | 'crew'; hint: string | null } | null>(null);
+  const [roleInfo, setRoleInfo] = useState<{ role: 'imposter' | 'crew' } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [socketId, setSocketId] = useState<string | null>(null);

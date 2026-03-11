@@ -403,14 +403,16 @@ export default function PartyPage() {
                   <p className="text-xl font-black text-white">{partyState.game.category}</p>
                 </div>
               )}
-              <div className={`w-full rounded-2xl p-5 text-center border ${me?.role === 'imposter' ? 'bg-rose-900/30 border-rose-800/30' : 'bg-indigo-950/30 border-indigo-900/30'}`}>
-                <p className={`text-[9px] font-black uppercase tracking-widest mb-2 ${me?.role === 'imposter' ? 'text-rose-500' : 'text-indigo-400'}`}>
-                  {me?.role === 'imposter' ? 'Your Hint' : 'Your Word'}
-                </p>
-                <p className="text-4xl font-black italic text-white tracking-tight break-words leading-tight" data-testid={me?.role === 'imposter' ? 'reveal-hint' : 'reveal-word'}>
-                  &quot;{me?.role === 'imposter' ? partyState.game.hint : partyState.game.secretWord}&quot;
-                </p>
-              </div>
+              {me?.role !== 'imposter' && (
+                <div className="w-full rounded-2xl p-5 text-center border bg-indigo-950/30 border-indigo-900/30">
+                  <p className="text-[9px] font-black uppercase tracking-widest mb-2 text-indigo-400">
+                    Your Word
+                  </p>
+                  <p className="text-4xl font-black italic text-white tracking-tight break-words leading-tight" data-testid="reveal-word">
+                    &quot;{partyState.game.secretWord}&quot;
+                  </p>
+                </div>
+              )}
               <p className={`text-xs text-center leading-relaxed px-2 ${me?.role === 'imposter' ? 'text-rose-300/50' : 'text-slate-500'}`}>
                 {me?.role === 'imposter'
                   ? 'Blend in. Give vague clues. Do not reveal you are an infiltrator.'
@@ -539,15 +541,9 @@ export default function PartyPage() {
 
             {/* Word reveal card */}
             <div className="bg-slate-900 rounded-3xl border border-slate-800 p-5 space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <p className="text-[9px] font-black uppercase tracking-widest text-indigo-400">The Word</p>
-                  <p className="text-2xl font-black italic text-white break-words">&quot;{partyState.game.secretWord}&quot;</p>
-                </div>
-                <div className="space-y-1">
-                  <p className="text-[9px] font-black uppercase tracking-widest text-rose-400">Imposter Hint</p>
-                  <p className="text-lg font-black italic text-slate-300 break-words">&quot;{partyState.game.hint}&quot;</p>
-                </div>
+              <div className="space-y-1">
+                <p className="text-[9px] font-black uppercase tracking-widest text-indigo-400">The Word</p>
+                <p className="text-2xl font-black italic text-white break-words">&quot;{partyState.game.secretWord}&quot;</p>
               </div>
               <div className="border-t border-slate-800 pt-4">
                 <p className="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-2">The Infiltrators</p>

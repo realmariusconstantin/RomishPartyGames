@@ -31,7 +31,7 @@ describe('GameEngine', () => {
     engine.joinParty(code, 'p2', 's2', 'P2');
     engine.joinParty(code, 'p3', 's3', 'P3');
     
-    engine.startGame(code, 1, 'ASTRONAUT', 'Beyond world');
+    engine.startGame(code, 1, 'ASTRONAUT', 'Space');
     const party = engine.getParty(code);
     
     const imposters = party?.players.filter(p => p.role === 'imposter');
@@ -40,7 +40,7 @@ describe('GameEngine', () => {
     expect(imposters?.length).toBe(1);
     expect(crew?.length).toBe(2);
     expect(party?.game.secretWord).toBe('ASTRONAUT');
-    expect(party?.game.hint).toBe('Beyond world');
+    expect(party?.game.category).toBe('Space');
   });
 
   it('should use short timers in TEST_MODE', () => {
@@ -50,7 +50,7 @@ describe('GameEngine', () => {
     engineWithTestMode.joinParty(code, 'p2', 's2', 'P2');
     engineWithTestMode.joinParty(code, 'p3', 's3', 'P3');
     
-    engineWithTestMode.startGame(code, 1, 'Word', 'Hint');
+    engineWithTestMode.startGame(code, 1, 'Word', 'TestCategory');
     const party = engineWithTestMode.getParty(code);
     
     // In start_game, it transitions to COUNTDOWN with 5s

@@ -56,7 +56,6 @@ export class GameEngine {
         imposterCount: 1,
         remainingTime: 0,
         secretWord: null,
-        hint: null,
         category: null,
         lastEliminated: null,
         winner: null,
@@ -334,7 +333,7 @@ export class GameEngine {
     }
   }
 
-  startGame(code: string, imposterCount: number, secretWord: string, hint: string, category = ''): Party | null {
+  startGame(code: string, imposterCount: number, secretWord: string, category = ''): Party | null {
     const party = this.parties.get(code);
     if (!party || (party.game.phase !== GamePhase.LOBBY && party.game.phase !== GamePhase.PREGAME)) return null;
     
@@ -349,7 +348,6 @@ export class GameEngine {
     party.game.imposterCount = Math.max(1, Math.min(imposterCount, maxAllowed));
 
     party.game.secretWord = secretWord;
-    party.game.hint = hint;
     party.game.category = category;
     party.game.phase = GamePhase.COUNTDOWN;
     party.game.remainingTime = this.TIMES.COUNTDOWN;
@@ -477,7 +475,6 @@ export class GameEngine {
     party.game.remainingTime = 0;
     party.game.winner = null;
     party.game.secretWord = null;
-    party.game.hint = null;
     party.game.category = null;
     party.players.forEach(p => {
       p.role = null;

@@ -39,7 +39,6 @@ export interface GameState {
   remainingTime: number;
   imposterCount: number;
   secretWord: string | null; // Shared word for crew
-  hint: string | null;       // Shared hint for imposters
   category: string | null;   // Shown to everyone — narrows the domain
   lastEliminated: string | null; // ID of last person voted out
   winner: 'imposter' | 'crew' | null;
@@ -119,7 +118,7 @@ export interface ServerToClientEvents {
   state_update: (party: Party) => void;
   
   /** Private event sent to individual players when roles are revealed. */
-  role_reveal: (data: { role: 'imposter' | 'crew'; hint: string | null }) => void;
+  role_reveal: (data: { role: 'imposter' | 'crew' }) => void;
   
   /** Generic error message. */
   error: (message: string) => void;
