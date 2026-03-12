@@ -3,7 +3,7 @@ import { Party, GamePhase, ChatMessage } from './types';
 const DISCONNECT_GRACE = 30000; // 30 seconds
 const PARTY_EMPTY_GRACE = 120000; // 2 minutes
 
-type InternalParty = Party & { emptyAt: number | null };
+type InternalParty = Party & { emptyAt: number | null; recentImposters: string[] };
 
 export class GameEngine {
   private parties: Map<string, InternalParty> = new Map();
@@ -16,11 +16,11 @@ export class GameEngine {
     const isTest = process.env.TEST_MODE === 'true';
     this.TIMES = {
       PREGAME: isTest ? 5 : 30,
-      ROUND: isTest ? 10 : 120,
+      ROUND: isTest ? 10 : 0,
       REVEAL: isTest ? 2 : 5,
       COUNTDOWN: isTest ? 1 : 5,
       RESULTS: isTest ? 2 : 10,
-      VOTING_GRACE: isTest ? 2 : 10,
+      VOTING_GRACE: isTest ? 2 : 30,
       VOTE_RESULTS: isTest ? 2 : 5
     };
   }
@@ -37,9 +37,10 @@ export class GameEngine {
 
   createParty(playerId: string, socketId: string, playerName: string): string {
     const code = this.generatePartyCode();
-    const party: Party & { emptyAt: number | null } = {
+    const party: InternalParty = {
       code,
       emptyAt: null,
+      recentImposters: [],
       players: [
         {
           id: playerId,
@@ -352,18 +353,26 @@ export class GameEngine {
     party.game.phase = GamePhase.COUNTDOWN;
     party.game.remainingTime = this.TIMES.COUNTDOWN;
 
-    // Assign roles randomly
-    const indices = Array.from({ length: party.players.length }, (_, i) => i);
-    for (let i = indices.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [indices[i], indices[j]] = [indices[j], indices[i]];
-    }
-
-    const imposterIndices = indices.slice(0, party.game.imposterCount);
+    // Fair imposter assignment — avoid picking recent imposters
+    const recentImposters = party.recentImposters;
+    const allIndices = Array.from({ length: party.players.length }, (_, i) => i);
+    const shuffleArr = (arr: number[]) => {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+    };
+    const nonRecentIndices = allIndices.filter(i => !recentImposters.includes(party.players[i].id));
+    const recentIndices = allIndices.filter(i => recentImposters.includes(party.players[i].id));
+    shuffleArr(nonRecentIndices);
+    shuffleArr(recentIndices);
+    const candidateIndices = [...nonRecentIndices, ...recentIndices];
+    const imposterIndices = candidateIndices.slice(0, party.game.imposterCount);
     party.players.forEach((p, i) => {
       p.role = imposterIndices.includes(i) ? 'imposter' : 'crew';
       p.isDead = false;
     });
+    party.recentImposters = imposterIndices.map(i => party.players[i].id);
 
     party.votes.votedSkip = [];
     party.votes.votes = {};
@@ -461,8 +470,9 @@ export class GameEngine {
   private checkConsensus(party: Party): { party: Party; consensus: 'continue' | 'lobby' | null } {
     const connectedCount = party.players.filter(p => p.connected).length;
     const totalVotes = party.continueVotes.length + party.lobbyVotes.length;
+    const majority = Math.floor(connectedCount / 2) + 1;
 
-    if (totalVotes < connectedCount) {
+    if (totalVotes < majority) {
       return { party, consensus: null };
     }
 
@@ -505,12 +515,21 @@ export class GameEngine {
 
     party.votes.votes[playerId] = targetId;
 
-    // Check if everyone voted
     const activeVoters = party.players.filter(p => p.connected && !p.isDead);
     const votesCast = Object.keys(party.votes.votes).length;
 
-    if (votesCast >= activeVoters.length) {
+    // Resolve immediately on majority, or when everyone has voted
+    const tally: Record<string, number> = {};
+    Object.values(party.votes.votes).forEach(tid => { tally[tid] = (tally[tid] || 0) + 1; });
+    const majority = Math.floor(activeVoters.length / 2) + 1;
+    const hasMajority = Object.values(tally).some(count => count >= majority);
+
+    if (hasMajority || votesCast >= activeVoters.length) {
       this.resolveVotes(party);
+    } else if (party.game.phase === GamePhase.ROUND) {
+      // First vote in ROUND starts a countdown so the game never stays stuck
+      party.game.phase = GamePhase.VOTING_GRACE;
+      party.game.remainingTime = this.TIMES.VOTING_GRACE;
     }
 
     return party;

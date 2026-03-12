@@ -5,10 +5,11 @@ import { useEffect, useState, useRef } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { GamePhase, Party, ChatMessage } from '@/lib/types';
 import { toast } from 'sonner';
+import { QRCodeSVG } from 'qrcode.react';
 import {
   Users, Copy, ChevronRight, ShieldAlert, CheckCircle2, Crown,
   Radio, Home as HomeIcon, Settings2, LogOut, RotateCcw, Zap,
-  MessageSquare, X, Globe,
+  MessageSquare, X, Globe, QrCode,
 } from 'lucide-react';
 
 // ─── Chat Panel ──────────────────────────────────────────────────────────────
@@ -77,7 +78,11 @@ export default function PartyPage() {
 
   const [showSettings, setShowSettings] = useState(false);
   const [showChat, setShowChat] = useState(false);
+  const [showQR, setShowQR] = useState(false);
+  const [showLeaveWarning, setShowLeaveWarning] = useState(false);
   const [chatInput, setChatInput] = useState('');
+  const [enteredName, setEnteredName] = useState('');
+  const [joinedName, setJoinedName] = useState(userName);
 
   const currentPlayers = partyState?.players.length ?? 0;
   const maxAllowedImposters = currentPlayers >= 10 ? 3 : currentPlayers >= 7 ? 2 : 1;
@@ -100,14 +105,15 @@ export default function PartyPage() {
   };
 
   useEffect(() => {
-    if (code && userName && isConnected) joinParty(code as string, userName);
-  }, [code, userName, joinParty, isConnected]);
+    if (code && joinedName && isConnected) joinParty(code as string, joinedName);
+  }, [code, joinedName, joinParty, isConnected]);
 
   useEffect(() => {
-    if (partyState?.settings && partyState.settings.impostersCount > maxAllowedImposters) {
+    const isHost = partyState?.players.find(p => p.id === playerId)?.isLeader ?? false;
+    if (partyState?.game.phase === GamePhase.LOBBY && isHost && partyState?.settings && partyState.settings.impostersCount > maxAllowedImposters) {
       updateSettings({ ...partyState.settings, impostersCount: maxAllowedImposters });
     }
-  }, [partyState?.settings, maxAllowedImposters, updateSettings]);
+  }, [partyState?.game.phase, partyState?.players, partyState?.settings, playerId, maxAllowedImposters, updateSettings]);
 
   useEffect(() => {
     if (error) { toast.error(error); clearError(); }
@@ -119,6 +125,30 @@ export default function PartyPage() {
       return () => clearTimeout(t);
     }
   }, [isConnected, partyState, router]);
+
+  // ── Back button / close-tab interception ───────────────────────────────────
+  useEffect(() => {
+    // Push a sentinel entry so the first back-press is absorbed
+    window.history.pushState({ party: true }, '');
+
+    const handlePopState = () => {
+      // Re-push to keep the user on this page, then show the warning
+      window.history.pushState({ party: true }, '');
+      setShowLeaveWarning(true);
+    };
+
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, []);
 
   const me = partyState?.players.find(p => p.id === playerId);
   const isLeader = me?.isLeader ?? false;
@@ -137,6 +167,47 @@ export default function PartyPage() {
     if (me?.isDead || partyState?.votes.votes[playerId ?? '']) return;
     votePlayer(targetId);
   };
+
+  // ── Name entry (QR scan arrivals) ─────────────────────────────────────────
+  if (!joinedName) {
+    const handleNameSubmit = (e: React.FormEvent) => {
+      e.preventDefault();
+      const trimmed = enteredName.trim();
+      if (!trimmed || trimmed.length > 20) return;
+      setJoinedName(trimmed);
+    };
+    return (
+      <div className="flex flex-col items-center justify-center min-h-dvh bg-slate-950 p-6">
+        <div className="w-full max-w-sm space-y-6">
+          <div className="text-center space-y-2">
+            <div className="w-16 h-16 bg-indigo-600 rounded-[1.5rem] flex items-center justify-center mx-auto mb-4 shadow-xl shadow-indigo-900/40">
+              <Radio size={32} className="text-white animate-pulse" />
+            </div>
+            <p className="text-[10px] font-black uppercase tracking-[0.4em] text-indigo-500">Joining party</p>
+            <p className="text-3xl font-black text-white tracking-tight">{code}</p>
+          </div>
+          <form onSubmit={handleNameSubmit} className="space-y-3">
+            <input
+              autoFocus
+              type="text"
+              value={enteredName}
+              onChange={(e) => setEnteredName(e.target.value)}
+              placeholder="Your agent name…"
+              maxLength={20}
+              className="w-full bg-slate-900 border border-slate-700 rounded-2xl px-5 py-4 text-white font-black text-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/50 placeholder:text-slate-600"
+            />
+            <button
+              type="submit"
+              disabled={!enteredName.trim()}
+              className="w-full py-4 bg-indigo-600 text-white font-black rounded-2xl text-lg uppercase tracking-wide active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-lg shadow-indigo-900/40 flex items-center justify-center gap-3"
+            >
+              <ChevronRight size={22} /> Enter
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   // ── Loading screen ─────────────────────────────────────────────────────────
   if (!partyState || !isConnected) {
@@ -173,8 +244,17 @@ export default function PartyPage() {
           <span className={`hidden sm:block text-[9px] font-black px-2 py-1 rounded-full uppercase tracking-widest ${isLeader ? 'bg-amber-900/30 text-amber-400' : 'bg-slate-800 text-slate-500'}`}>
             {isLeader ? '★ Host' : me?.name ?? '…'}
           </span>
+          {phase === GamePhase.LOBBY && (
+            <button
+              onClick={() => setShowQR(true)}
+              className="p-2 bg-slate-800 text-slate-500 rounded-xl active:bg-indigo-900/40 active:text-indigo-400 transition-colors min-w-[40px] min-h-[40px] flex items-center justify-center"
+              title="Show QR code"
+            >
+              <QrCode size={16} />
+            </button>
+          )}
           <button
-            onClick={() => leaveParty()}
+            onClick={() => setShowLeaveWarning(true)}
             data-testid="btn-leave"
             className="p-2 bg-slate-800 text-slate-500 rounded-xl active:bg-rose-900/40 active:text-rose-400 transition-colors min-w-[40px] min-h-[40px] flex items-center justify-center"
           >
@@ -439,9 +519,11 @@ export default function PartyPage() {
                     <Radio size={10} className="animate-pulse" />
                     {phase === GamePhase.VOTING_GRACE ? 'Vote now!' : 'Discussion'}
                   </div>
-                  <div className={`text-7xl font-black italic leading-none tracking-tighter tabular-nums ${partyState.game.remainingTime < 30 ? 'text-rose-500' : 'text-white'}`} data-testid="timer-display">
-                    {Math.floor(partyState.game.remainingTime / 60)}:{(partyState.game.remainingTime % 60).toString().padStart(2, '0')}
-                  </div>
+                  {(phase !== GamePhase.ROUND || partyState.game.remainingTime > 0) && (
+                    <div className={`text-7xl font-black italic leading-none tracking-tighter tabular-nums ${partyState.game.remainingTime < 30 ? 'text-rose-500' : 'text-white'}`} data-testid="timer-display">
+                      {Math.floor(partyState.game.remainingTime / 60)}:{(partyState.game.remainingTime % 60).toString().padStart(2, '0')}
+                    </div>
+                  )}
                 </div>
 
                 {/* Vote header */}
@@ -589,6 +671,63 @@ export default function PartyPage() {
         )}
 
       </div>
+
+      {/* ── Leave Warning Modal ── */}
+      {showLeaveWarning && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-6">
+          <div className="bg-slate-900 rounded-[2rem] border border-slate-700 p-8 flex flex-col items-center gap-6 max-w-xs w-full shadow-2xl">
+            <div className="w-14 h-14 bg-rose-900/30 rounded-[1.5rem] flex items-center justify-center border border-rose-800/50">
+              <LogOut size={26} className="text-rose-400" />
+            </div>
+            <div className="text-center space-y-2">
+              <p className="text-xl font-black text-white">Leave the Party?</p>
+              <p className="text-sm text-slate-400 font-bold leading-snug">You'll lose your spot. Reconnecting mid-game may not be possible.</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3 w-full">
+              <button
+                onClick={() => setShowLeaveWarning(false)}
+                className="py-4 bg-slate-800 text-white font-black rounded-2xl text-base uppercase tracking-wide border border-slate-700 active:bg-slate-700 transition-colors"
+              >
+                Stay
+              </button>
+              <button
+                onClick={() => { setShowLeaveWarning(false); leaveParty(); }}
+                className="py-4 bg-rose-600 text-white font-black rounded-2xl text-base uppercase tracking-wide active:bg-rose-700 transition-colors"
+              >
+                Leave
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── QR Modal ── */}
+      {showQR && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-6" onClick={() => setShowQR(false)}>
+          <div className="bg-slate-900 rounded-[2rem] border border-slate-700 p-8 flex flex-col items-center gap-6 max-w-xs w-full shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between w-full">
+              <p className="text-[10px] font-black uppercase tracking-[0.4em] text-indigo-500 flex items-center gap-2">
+                <QrCode size={12} /> Scan to Join
+              </p>
+              <button onClick={() => setShowQR(false)} className="p-1.5 text-slate-500 hover:text-white rounded-lg transition-colors">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="bg-white p-4 rounded-2xl">
+              <QRCodeSVG
+                value={typeof window !== 'undefined' ? `${window.location.origin}/party/${partyState.code}` : ''}
+                size={200}
+                bgColor="#ffffff"
+                fgColor="#0f172a"
+              />
+            </div>
+            <div className="text-center space-y-1">
+              <p className="text-3xl font-black text-white font-mono tracking-widest">{partyState.code}</p>
+              <p className="text-[10px] text-slate-500 font-black uppercase tracking-widest">Scan or share the code</p>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

@@ -50,7 +50,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     if (typeof window !== 'undefined') {
       let id = sessionStorage.getItem('imposter_player_id');
       if (!id) {
-        id = crypto.randomUUID();
+        id = (crypto.randomUUID ?? (() => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16); })))();
         sessionStorage.setItem('imposter_player_id', id);
         console.log(`%c[Identity] GENERATED NEW PLAYER ID: ${id}`, "color: #6366f1; font-weight: bold; background: #eef2ff; padding: 2px 6px; border-radius: 4px;");
       } else {
@@ -68,10 +68,12 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     // Ensure fresh connection for each tab
     const newSocket: Socket<ServerToClientEvents, ClientToServerEvents> = io({
       reconnection: true,
-      reconnectionAttempts: 5,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 500,
+      reconnectionDelayMax: 4000,
       transports: ['websocket', 'polling'],
-      forceNew: true, // Crucial for multi-tab testing on some browsers
-      auth: { playerId } 
+      forceNew: true,
+      auth: { playerId }
     });
 
     newSocket.on('connect', () => {
@@ -98,6 +100,21 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       setIsConnected(false);
       setSocketId(null);
     });
+
+    // Re-sync state whenever the tab/app becomes visible again (covers phone app-switching)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && newSocket.connected) {
+        newSocket.emit('state:sync');
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // Periodic heartbeat so missed broadcasts self-heal within 8 seconds
+    const syncInterval = setInterval(() => {
+      if (newSocket.connected && sessionStorage.getItem('imposter_party_code')) {
+        newSocket.emit('state:sync');
+      }
+    }, 8000);
 
     newSocket.on('state_update', (state) => {
       setPartyState(state);
@@ -130,6 +147,8 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     socketRef.current = newSocket;
 
     return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      clearInterval(syncInterval);
       newSocket.close();
     };
   }, [playerId, router]);
