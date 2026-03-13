@@ -20,3 +20,8 @@ Rules learned from corrections and mistakes — reviewed at session start.
 
 **Mistake (potential):** Could have just noted the test failure and moved on.
 **Rule:** If a test was already failing, trace the root cause and fix it. The `leaveParty cleans up continue/lobby votes` test had a party-size/majority mismatch — adding a 4th player in the test setup was the correct fix, not skipping or ignoring it.
+
+### Never detach a native method from its object via `??` or variable assignment
+
+**Mistake:** Wrote `(crypto.randomUUID ?? fallback)()` — pulling `randomUUID` out as a bare reference detaches it from the `crypto` object, losing its `this` binding. Calling it then throws "Illegal invocation".
+**Rule:** Always call native methods through their owner object: `typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : fallback`. This applies to any host/native API (`crypto`, `navigator`, `document`, etc.) — never extract them as bare references.

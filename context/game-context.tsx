@@ -67,14 +67,15 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
 
     let id = sessionStorage.getItem('imposter_player_id');
     if (!id) {
-      // crypto.randomUUID is available in all modern browsers; the fallback
-      // covers very old environments (shouldn't be needed in practice).
-      id = (crypto.randomUUID ?? (() =>
-        'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-          const r = Math.random() * 16 | 0;
-          return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-        })
-      ))();
+      // Call randomUUID via the crypto object so `this` stays bound correctly.
+      // Pulling it out as a bare reference (crypto.randomUUID ?? fallback)()
+      // detaches it from its context and causes "Illegal invocation".
+      id = typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+            const r = Math.random() * 16 | 0;
+            return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+          });
       sessionStorage.setItem('imposter_player_id', id);
       console.log(`%c[Identity] GENERATED NEW PLAYER ID: ${id}`, 'color: #6366f1; font-weight: bold; background: #eef2ff; padding: 2px 6px; border-radius: 4px;');
     } else {
