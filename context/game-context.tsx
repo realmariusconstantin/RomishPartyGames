@@ -3,77 +3,105 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { useRouter } from 'next/navigation';
-import { 
-  Party, 
-  ClientToServerEvents, 
+import {
+  Party,
+  ClientToServerEvents,
   ServerToClientEvents,
-  PartySettings 
+  PartySettings
 } from '@/lib/types';
 
+// ---------------------------------------------------------------------------
+// Context shape
+// ---------------------------------------------------------------------------
+
 interface GameContextType {
-  partyState: Party | null;
-  roleInfo: { role: 'imposter' | 'crew' } | null;
-  error: string | null;
-  socketId: string | null;
-  playerId: string | null;
-  isConnected: boolean;
-  
-  createParty: (name: string) => void;
-  joinParty: (code: string, name: string) => void;
-  proposeGame: () => void;
-  voteStart: () => void;
-  cancelStart: () => void;
-  voteSkip: () => void;
-  votePlayer: (targetId: string) => void;
-  syncState: () => void;
-  updateSettings: (settings: PartySettings) => void;
-  disbandParty: () => void;
-  leaveParty: () => void;
-  sendMessage: (text: string) => void;
-  voteContinue: () => void;
-  voteLobby: () => void;
-  kickPlayer: (targetId: string) => void;
-  clearError: () => void;
+  partyState:    Party | null;
+  roleInfo:      { role: 'imposter' | 'crew' } | null;
+  error:         string | null;
+  socketId:      string | null;
+  playerId:      string | null;
+  isConnected:   boolean;
+
+  // Actions (all emit events to the server)
+  createParty:   (name: string) => void;
+  joinParty:     (code: string, name: string) => void;
+  proposeGame:   () => void;
+  voteStart:     () => void;
+  cancelStart:   () => void;
+  voteSkip:      () => void;
+  votePlayer:    (targetId: string) => void;
+  syncState:     () => void;
+  updateSettings:(settings: PartySettings) => void;
+  disbandParty:  () => void;
+  leaveParty:    () => void;
+  sendMessage:   (text: string) => void;
+  voteContinue:  () => void;
+  voteLobby:     () => void;
+  kickPlayer:    (targetId: string) => void;
+  clearError:    () => void;
 }
 
 const GameContext = createContext<GameContextType | undefined>(undefined);
 
+// ---------------------------------------------------------------------------
+// Provider
+// ---------------------------------------------------------------------------
+
 export function GameProvider({ children }: { children: React.ReactNode }) {
-  const router = useRouter();
+  const router    = useRouter();
   const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
-  const [partyState, setPartyState] = useState<Party | null>(null);
-  const [roleInfo, setRoleInfo] = useState<{ role: 'imposter' | 'crew' } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+
+  const [partyState,  setPartyState ] = useState<Party | null>(null);
+  const [roleInfo,    setRoleInfo   ] = useState<{ role: 'imposter' | 'crew' } | null>(null);
+  const [error,       setError      ] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
-  const [socketId, setSocketId] = useState<string | null>(null);
+  const [socketId,    setSocketId   ] = useState<string | null>(null);
+
+  /**
+   * Stable player identity for the session. Generated once on first visit and
+   * stored in sessionStorage so reconnects after a dropped connection are
+   * handled transparently by the server.
+   */
   const [playerId] = useState<string | null>(() => {
-    if (typeof window !== 'undefined') {
-      let id = sessionStorage.getItem('imposter_player_id');
-      if (!id) {
-        id = (crypto.randomUUID ?? (() => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16); })))();
-        sessionStorage.setItem('imposter_player_id', id);
-        console.log(`%c[Identity] GENERATED NEW PLAYER ID: ${id}`, "color: #6366f1; font-weight: bold; background: #eef2ff; padding: 2px 6px; border-radius: 4px;");
-      } else {
-        console.log(`%c[Identity] LOADED PLAYER ID: ${id}`, "color: #10b981; font-weight: bold; background: #ecfdf5; padding: 2px 6px; border-radius: 4px;");
-      }
-      return id;
+    if (typeof window === 'undefined') return null;
+
+    let id = sessionStorage.getItem('imposter_player_id');
+    if (!id) {
+      // crypto.randomUUID is available in all modern browsers; the fallback
+      // covers very old environments (shouldn't be needed in practice).
+      id = (crypto.randomUUID ?? (() =>
+        'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+          const r = Math.random() * 16 | 0;
+          return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+        })
+      ))();
+      sessionStorage.setItem('imposter_player_id', id);
+      console.log(`%c[Identity] GENERATED NEW PLAYER ID: ${id}`, 'color: #6366f1; font-weight: bold; background: #eef2ff; padding: 2px 6px; border-radius: 4px;');
+    } else {
+      console.log(`%c[Identity] LOADED PLAYER ID: ${id}`, 'color: #10b981; font-weight: bold; background: #ecfdf5; padding: 2px 6px; border-radius: 4px;');
     }
-    return null;
+    return id;
   });
 
-  // Persistence logic for playerName, partyCode, and playerId
+  // -------------------------------------------------------------------------
+  // Socket lifecycle
+  // -------------------------------------------------------------------------
+
   useEffect(() => {
     if (!playerId) return;
-    
-    // Ensure fresh connection for each tab
+
+    /**
+     * One socket per tab (forceNew: true). The playerId is sent in the auth
+     * handshake so the server can identify reconnecting players.
+     */
     const newSocket: Socket<ServerToClientEvents, ClientToServerEvents> = io({
-      reconnection: true,
+      reconnection:        true,
       reconnectionAttempts: Infinity,
-      reconnectionDelay: 500,
+      reconnectionDelay:   500,
       reconnectionDelayMax: 4000,
-      transports: ['websocket', 'polling'],
-      forceNew: true,
-      auth: { playerId }
+      transports:          ['websocket', 'polling'],
+      forceNew:            true,
+      auth:                { playerId },
     });
 
     newSocket.on('connect', () => {
@@ -81,17 +109,16 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       setIsConnected(true);
       setSocketId(newSocket.id || null);
       setError(null);
-      
-      // Auto-rejoin if we have saved info
+
+      // Auto-rejoin if we have a saved party code (handles page refresh / reconnect)
       const currentName = sessionStorage.getItem('imposter_player_name');
       const currentCode = sessionStorage.getItem('imposter_party_code');
-      
       if (currentName && currentCode) {
         console.log('[Socket] Attempting auto-rejoin for:', currentCode);
         newSocket.emit('join_party', currentCode, currentName);
       }
-      
-      // Always sync on reconnect to handle state misses
+
+      // Always request latest state on reconnect to cover any missed broadcasts
       newSocket.emit('state:sync');
     });
 
@@ -101,7 +128,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       setSocketId(null);
     });
 
-    // Re-sync state whenever the tab/app becomes visible again (covers phone app-switching)
+    // Re-sync whenever the tab becomes visible again (handles phone app-switching)
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible' && newSocket.connected) {
         newSocket.emit('state:sync');
@@ -109,16 +136,20 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    // Periodic heartbeat so missed broadcasts self-heal within 8 seconds
+    // Heartbeat: self-heals missed broadcasts within 8 seconds
     const syncInterval = setInterval(() => {
       if (newSocket.connected && sessionStorage.getItem('imposter_party_code')) {
         newSocket.emit('state:sync');
       }
     }, 8000);
 
+    // -----------------------------------------------------------------------
+    // Inbound event handlers
+    // -----------------------------------------------------------------------
+
     newSocket.on('state_update', (state) => {
       setPartyState(state);
-      // Persist party code when we successfully get a state
+      // Persist party code so auto-rejoin works after a page reload
       sessionStorage.setItem('imposter_party_code', state.code);
     });
 
@@ -134,13 +165,11 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       sessionStorage.setItem('imposter_party_code', code);
     });
 
-    // Remove settings toast, handled silently
-
     newSocket.on('party:disbanded', () => {
+      // Reset all local state and send the player back to the home page
       setPartyState(null);
       setRoleInfo(null);
       sessionStorage.removeItem('imposter_party_code');
-      // If we are currently in a lobby, the redirect tells us why
       router.push('/');
     });
 
@@ -152,6 +181,12 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       newSocket.close();
     };
   }, [playerId, router]);
+
+  // -------------------------------------------------------------------------
+  // Action callbacks
+  // All are stable references (useCallback with empty/minimal deps) so
+  // consumers don't re-render unnecessarily.
+  // -------------------------------------------------------------------------
 
   const createParty = useCallback((name: string) => {
     sessionStorage.setItem('imposter_player_name', name);
@@ -216,7 +251,14 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     socketRef.current?.emit('vote_lobby');
   }, []);
 
+  /** Leader-only: ejects another player from the party. */
+  const kickPlayer = useCallback((targetId: string) => {
+    socketRef.current?.emit('kick_player', targetId);
+  }, []);
+
   const clearError = useCallback(() => setError(null), []);
+
+  // -------------------------------------------------------------------------
 
   return (
     <GameContext.Provider value={{
@@ -240,9 +282,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       sendMessage,
       voteContinue,
       voteLobby,
-      kickPlayer: (targetId: string) => {
-        socketRef.current?.emit('kick_player', targetId);
-      },
+      kickPlayer,
       clearError,
     }}>
       {children}
@@ -250,6 +290,17 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Hook
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the game context. Must be used inside a <GameProvider>.
+ *
+ * Named useGameStore for historical reasons; it is a plain React Context hook,
+ * not a Zustand/Redux store. Consumers can use the re-exported `useGame` alias
+ * from hooks/use-game.ts for a shorter import path.
+ */
 export function useGameStore() {
   const context = useContext(GameContext);
   if (context === undefined) {

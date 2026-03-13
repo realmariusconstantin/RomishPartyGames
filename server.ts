@@ -1,3 +1,15 @@
+/**
+ * server.ts — Entry point for the Node.js process.
+ *
+ * Wires together three things:
+ *  1. Express — used only as an adapter to hand HTTP requests to Next.js
+ *  2. Socket.IO — all real-time game communication
+ *  3. Next.js — serves the React frontend
+ *
+ * All game state lives in the in-memory `gameEngine` singleton (lib/game-engine.ts).
+ * There is no database; if the process restarts, all parties are lost.
+ */
+
 import { createServer } from 'http';
 import next from 'next';
 import { Server } from 'socket.io';
@@ -6,15 +18,26 @@ import { gameEngine } from './lib/game-engine';
 import { ClientToServerEvents, ServerToClientEvents, GamePhase, Party } from './lib/types';
 import { getRandomWord } from './lib/wordpacks';
 
-const dev = process.env.NODE_ENV !== 'production';
+const dev      = process.env.NODE_ENV !== 'production';
 const hostname = '0.0.0.0';
-const port = 3000;
+const port     = 3000;
 
-const app = next({ dev, hostname, port });
+const app    = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
+// ---------------------------------------------------------------------------
+// getSafeState
+// ---------------------------------------------------------------------------
+
+/**
+ * Strips server-only fields before sending party state to a specific player:
+ *  - Other players' roles are hidden (except when the viewer is an impostor,
+ *    who can see fellow impostors, or when the game is over and all are revealed)
+ *  - The secret word is hidden from impostors (they don't know the word)
+ *  - Internal socketIds are never sent to clients
+ */
 function getSafeState(party: Party, playerId: string): Party {
-  const me = party.players.find(p => p.id === playerId);
+  const me         = party.players.find(p => p.id === playerId);
   const isImposter = me?.role === 'imposter';
   const isGameOver = party.game.phase === GamePhase.RESULTS;
 
@@ -22,26 +45,47 @@ function getSafeState(party: Party, playerId: string): Party {
     ...party,
     players: party.players.map(p => ({
       ...p,
-      role: (isGameOver || p.id === playerId || (isImposter && p.role === 'imposter')) ? p.role : null,
-      socketId: null, // Hide internal socket IDs from clients
+      // Reveal role only to the player themselves, to fellow impostors, or after game over
+      role:     (isGameOver || p.id === playerId || (isImposter && p.role === 'imposter'))
+        ? p.role
+        : null,
+      socketId: null, // Never expose internal socket IDs
     })),
     game: {
       ...party.game,
+      // Crew sees the word; impostors must not (they're posing as if they know)
       secretWord: (me?.role === 'crew' || isGameOver) ? party.game.secretWord : null,
-    }
+    },
   };
 }
 
+// ---------------------------------------------------------------------------
+// Bootstrap
+// ---------------------------------------------------------------------------
+
 app.prepare().then(() => {
-  const server = express();
+  const server     = express();
   const httpServer = createServer(server);
+
+  /**
+   * Typed Socket.IO server — ClientToServerEvents describes what the browser
+   * emits, ServerToClientEvents what the server emits.
+   */
   const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer);
 
+  // -------------------------------------------------------------------------
+  // broadcastState
+  // -------------------------------------------------------------------------
+
+  /**
+   * Sends a personalised state snapshot to every connected player in a party.
+   * Each player receives a version with sensitive information stripped for their
+   * specific perspective (see getSafeState).
+   */
   const broadcastState = (code: string) => {
     const party = gameEngine.getParty(code);
     if (!party) return;
-    
-    // Send personalized state to each player in the room
+
     party.players.forEach(p => {
       if (p.socketId) {
         io.to(p.socketId).emit('state_update', getSafeState(party, p.id));
@@ -49,15 +93,29 @@ app.prepare().then(() => {
     });
   };
 
-  // Global game loop for ticking
+  // -------------------------------------------------------------------------
+  // Game loop — 1-second tick
+  // -------------------------------------------------------------------------
+
+  /**
+   * Drives the phase state machine for all active parties. GameEngine.tick()
+   * returns only the parties that changed this tick, so we only broadcast to
+   * rooms that actually need an update.
+   */
   setInterval(() => {
     const updatedParties = gameEngine.tick();
     updatedParties.forEach(party => broadcastState(party.code));
   }, 1000);
 
+  // -------------------------------------------------------------------------
+  // Socket event handlers
+  // -------------------------------------------------------------------------
+
   io.on('connection', (socket) => {
     const playerId = socket.handshake.auth.playerId as string;
     console.log(`[Socket] OPEN: ${socket.id} | PlayerID: ${playerId}`);
+
+    // --- Party management ---------------------------------------------------
 
     socket.on('create_party', (name) => {
       if (typeof name !== 'string' || name.trim().length === 0 || name.length > 20) {
@@ -79,8 +137,9 @@ app.prepare().then(() => {
         const { party, isNew } = result;
         console.log(`[Party] Join: ${name} to ${party.code} (ID: ${playerId})`);
         socket.join(party.code);
+        // Only emit the join system message for genuinely new players, not reconnects
         if (isNew) {
-           gameEngine.addSystemMessage(party.code, `${name} has joined the network`);
+          gameEngine.addSystemMessage(party.code, `${name} has joined the network`);
         }
         broadcastState(party.code);
       } else {
@@ -89,7 +148,7 @@ app.prepare().then(() => {
       }
     });
 
-    // Handle state:sync
+    /** Client requests a full state push — used on reconnect and tab-visibility change. */
     socket.on('state:sync', () => {
       const party = gameEngine.getPartyByPlayerId(playerId);
       if (party) {
@@ -97,9 +156,66 @@ app.prepare().then(() => {
       }
     });
 
+    socket.on('party:updateSettings', (settings) => {
+      const party = gameEngine.getPartyByPlayerId(playerId);
+      const me    = party?.players.find(p => p.id === playerId);
+
+      if (!party) return socket.emit('error', 'Party not found');
+      if (!me?.isLeader) return socket.emit('error', 'Only the leader can update settings');
+      if (party.game.phase !== GamePhase.LOBBY) return socket.emit('error', 'Settings can only be changed in lobby');
+
+      const updated = gameEngine.updateSettings(party.code, settings);
+      if (updated) {
+        broadcastState(party.code);
+      } else {
+        socket.emit('error', 'Invalid settings: Check player count and limits (3-10 players, valid language)');
+      }
+    });
+
+    socket.on('party:disband', () => {
+      const party = gameEngine.getPartyByPlayerId(playerId);
+      const me    = party?.players.find(p => p.id === playerId);
+
+      if (!party) return socket.emit('error', 'Party not found');
+      if (!me?.isLeader) return socket.emit('error', 'Only the leader can disband the party');
+
+      // Notify all members before removing the party from memory
+      io.to(party.code).emit('party:disbanded');
+      gameEngine.disbandParty(party.code);
+    });
+
+    socket.on('party:leave', () => {
+      const party = gameEngine.getPartyBySocket(socket.id);
+      const name  = party?.players.find(p => p.socketId === socket.id)?.name;
+      const code  = party?.code;
+
+      const updatedParty = gameEngine.leaveParty(socket.id);
+      if (updatedParty) {
+        if (name) gameEngine.addSystemMessage(updatedParty.code, `${name} has left the network`);
+        broadcastState(updatedParty.code);
+      }
+      // Tell the leaver's socket to reset as well (same event the server sends for disband)
+      socket.emit('party:disbanded');
+      socket.leave(code || '');
+    });
+
+    socket.on('kick_player', (targetId) => {
+      const result = gameEngine.kickPlayer(socket.id, targetId);
+      if (result) {
+        const { party, targetSocketId } = result;
+        broadcastState(party.code);
+        // Force the kicked player's browser to redirect to home
+        if (targetSocketId) {
+          io.to(targetSocketId).emit('party:disbanded');
+        }
+      }
+    });
+
+    // --- Pre-game vote ------------------------------------------------------
+
     socket.on('propose_game', () => {
       const party = gameEngine.getPartyByPlayerId(playerId);
-      const me = party?.players.find(p => p.id === playerId);
+      const me    = party?.players.find(p => p.id === playerId);
 
       if (!party) return socket.emit('error', 'Party not found');
       if (!me?.isLeader) return socket.emit('error', 'Only the leader can start the game');
@@ -117,8 +233,9 @@ app.prepare().then(() => {
       const result = gameEngine.voteStart(socket.id);
       if (!result) return;
       if (result.shouldStart) {
-        const { party } = result;
-        const mission = getRandomWord(party.settings.language || 'english');
+        // Majority voted yes — pick a random word and kick off the game
+        const { party }  = result;
+        const mission    = getRandomWord(party.settings.language || 'english');
         gameEngine.startGame(party.code, party.settings.impostersCount, mission.word, mission.category);
         console.log(`[Game] Starting party ${party.code} | word: ${mission.word} | lang: ${party.settings.language}`);
       }
@@ -134,53 +251,12 @@ app.prepare().then(() => {
       broadcastState(result.party.code);
     });
 
+    // --- In-round voting ----------------------------------------------------
 
-    socket.on('party:updateSettings', (settings) => {
-      const party = gameEngine.getPartyByPlayerId(playerId);
-      const me = party?.players.find(p => p.id === playerId);
-      
-      if (!party) return socket.emit('error', 'Party not found');
-      if (!me?.isLeader) return socket.emit('error', 'Only the leader can update settings');
-      if (party.game.phase !== GamePhase.LOBBY) return socket.emit('error', 'Settings can only be changed in lobby');
-
-      const updated = gameEngine.updateSettings(party.code, settings);
-      if (updated) {
-        broadcastState(party.code);
-      } else {
-        socket.emit('error', 'Invalid settings: Check player count and limits (3-10 players, valid language)');
-      }
-    });
-
-    socket.on('party:disband', () => {
-      const party = gameEngine.getPartyByPlayerId(playerId);
-      const me = party?.players.find(p => p.id === playerId);
-      
-      if (!party) return socket.emit('error', 'Party not found');
-      if (!me?.isLeader) return socket.emit('error', 'Only the leader can disband the party');
-
-      io.to(party.code).emit('party:disbanded');
-      gameEngine.disbandParty(party.code);
-    });
-
-    socket.on('party:leave', () => {
-      const party = gameEngine.getPartyBySocket(socket.id);
-      const name = party?.players.find(p => p.socketId === socket.id)?.name;
-      const code = party?.code;
-      
-      const updatedParty = gameEngine.leaveParty(socket.id);
+    socket.on('vote_player', (targetId) => {
+      const updatedParty = gameEngine.votePlayer(socket.id, targetId);
       if (updatedParty) {
-        if (name) gameEngine.addSystemMessage(updatedParty.code, `${name} has left the network`);
         broadcastState(updatedParty.code);
-      }
-      socket.emit('party:disbanded'); // Also clear state for the leaver
-      socket.leave(code || ''); 
-    });
-
-    socket.on('send_message', (text) => {
-      if (typeof text !== 'string' || text.trim().length === 0 || text.length > 500) return;
-      const result = gameEngine.addMessage(socket.id, text);
-      if (result) {
-        broadcastState(result.party.code);
       }
     });
 
@@ -195,17 +271,23 @@ app.prepare().then(() => {
       }
     });
 
-    socket.on('vote_player', (targetId) => {
-      const updatedParty = gameEngine.votePlayer(socket.id, targetId);
-      if (updatedParty) {
-        broadcastState(updatedParty.code);
+    // --- Chat ---------------------------------------------------------------
+
+    socket.on('send_message', (text) => {
+      if (typeof text !== 'string' || text.trim().length === 0 || text.length > 500) return;
+      const result = gameEngine.addMessage(socket.id, text);
+      if (result) {
+        broadcastState(result.party.code);
       }
     });
+
+    // --- Post-game vote -----------------------------------------------------
 
     socket.on('vote_continue', () => {
       const result = gameEngine.voteContinue(socket.id);
       if (result) {
         if (result.consensus === 'continue') {
+          // Majority wants to play again — start a new game immediately
           const mission = getRandomWord(result.party.settings.language || 'english');
           gameEngine.startGame(result.party.code, result.party.settings.impostersCount, mission.word, mission.category);
         }
@@ -220,16 +302,7 @@ app.prepare().then(() => {
       }
     });
 
-    socket.on('kick_player', (targetId) => {
-      const result = gameEngine.kickPlayer(socket.id, targetId);
-      if (result) {
-        const { party, targetSocketId } = result;
-        broadcastState(party.code);
-        if (targetSocketId) {
-          io.to(targetSocketId).emit('party:disbanded'); // Force redirect for kicked player
-        }
-      }
-    });
+    // --- Connection lifecycle ------------------------------------------------
 
     socket.on('disconnect', () => {
       const party = gameEngine.disconnectPlayer(socket.id);
@@ -239,6 +312,10 @@ app.prepare().then(() => {
       }
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Next.js catch-all — must come after Socket.IO setup
+  // -------------------------------------------------------------------------
 
   server.all('*path', (req, res) => {
     return handle(req, res);

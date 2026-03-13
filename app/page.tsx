@@ -53,14 +53,17 @@ export default function Home() {
     return (
       <main className="flex min-h-screen flex-col items-center justify-center p-6 bg-slate-50 font-sans text-gray-900">
         <div className="w-full max-w-4xl space-y-12">
-          <div className="flex justify-end">
-            <button 
-              onClick={handleReset}
-              className="text-[10px] font-black text-slate-300 hover:text-rose-500 uppercase tracking-widest transition-colors flex items-center gap-1.5"
-            >
-              <RefreshCw size={12} /> Clear Testing Session
-            </button>
-          </div>
+          {/* Only visible during local development — hidden in production builds */}
+          {process.env.NODE_ENV !== 'production' && (
+            <div className="flex justify-end">
+              <button
+                onClick={handleReset}
+                className="text-[10px] font-black text-slate-300 hover:text-rose-500 uppercase tracking-widest transition-colors flex items-center gap-1.5"
+              >
+                <RefreshCw size={12} /> Clear Testing Session
+              </button>
+            </div>
+          )}
           <div className="text-center space-y-4">
             <h1 className="text-5xl md:text-7xl font-black tracking-tight text-slate-900 drop-shadow-sm">
               Romish <span className="text-indigo-600">Party Games</span>
@@ -163,6 +166,7 @@ export default function Home() {
                 placeholder="ENTER HANDLE"
                 value={name}
                 autoComplete="off"
+                maxLength={20}
                 onChange={(e) => setName(e.target.value)}
                 className="w-full bg-slate-800/50 border border-slate-700/50 p-6 rounded-3xl text-2xl font-black italic tracking-tighter placeholder:text-slate-800 focus:outline-none focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500/30 transition-all text-white shadow-inner"
               />

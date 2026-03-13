@@ -181,6 +181,9 @@ describe('GameEngine - disbandParty and vote cleanup on leave', () => {
   });
 
   it('leaveParty cleans up continue/lobby votes', () => {
+    // 4 players → majority = 3, so 2 votes (1 continue + 1 lobby) won't trigger
+    // consensus prematurely, letting us test the vote cleanup on leave.
+    engine.joinParty(code, 'p4', 's4', 'P4');
     const party = engine.getParty(code)!;
     party.game.phase = GamePhase.RESULTS;
     engine.voteContinue('s2');
