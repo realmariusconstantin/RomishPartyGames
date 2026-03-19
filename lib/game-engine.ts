@@ -5,7 +5,7 @@ import { Party, GamePhase, ChatMessage } from './types';
 // ---------------------------------------------------------------------------
 
 /** How long (ms) a disconnected player's slot is held before cleanup removes them. */
-const DISCONNECT_GRACE = 30000; // 30 seconds
+const DISCONNECT_GRACE = 120000; // 2 minutes
 
 /** How long (ms) a fully-empty party is kept alive in memory before deletion. */
 const PARTY_EMPTY_GRACE = 120000; // 2 minutes
@@ -65,7 +65,7 @@ export class GameEngine {
       REVEAL:       isTest ? 2  : 5,
       COUNTDOWN:    isTest ? 1  : 5,
       RESULTS:      isTest ? 2  : 10,
-      VOTING_GRACE: isTest ? 2  : 30,
+      VOTING_GRACE: isTest ? 2  : 120,
       VOTE_RESULTS: isTest ? 2  : 5,
     };
   }
@@ -639,9 +639,9 @@ export class GameEngine {
   ): { party: Party; consensus: 'continue' | 'lobby' | null } {
     const connectedCount = party.players.filter(p => p.connected).length;
     const totalVotes     = party.continueVotes.length + party.lobbyVotes.length;
-    const majority       = Math.floor(connectedCount / 2) + 1;
 
-    if (totalVotes < majority) return { party, consensus: null };
+    // Everyone must vote before consensus is reached
+    if (totalVotes < connectedCount) return { party, consensus: null };
 
     // Whoever has more votes wins; ties go to continue
     const consensus: 'continue' | 'lobby' =
@@ -836,7 +836,7 @@ export class GameEngine {
    */
   private updateVoteThreshold(party: Party) {
     const activePlayers      = party.players.filter(p => p.connected && !p.isDead);
-    party.votes.threshold    = Math.floor(activePlayers.length / 2) + 1;
+    party.votes.threshold    = activePlayers.length; // Everyone must vote to skip
   }
 
   /**
@@ -923,7 +923,7 @@ export class GameEngine {
       }
     }
 
-    // Cleanup runs every 30 seconds (aligned with DISCONNECT_GRACE)
+    // Cleanup runs every 30 seconds
     this.cleanupCounter++;
     if (this.cleanupCounter % 30 === 0) {
       this.cleanup();
